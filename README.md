@@ -1,3 +1,49 @@
+# NLP1 — team repo
+
+Private working repo for our NLP1 assignments (team: Cecce, Liam, Kazik). It started as a copy of the course repo [`nlp-illc/nlp1-student`](https://github.com/nlp-illc/nlp1-student), which is set as the `upstream` remote. The original course README is further down.
+
+## Setup
+
+```bash
+git clone https://github.com/artificial-cesare/nlp1-team.git
+cd nlp1-team
+uv sync              # builds .venv from pyproject.toml + uv.lock
+```
+
+### Data
+
+Data is **not** in git (`data/` is gitignored). Download the Kaggle competition [Name that LLM](https://www.kaggle.com/competitions/name-that-llm/data) (accept the rules first) and unzip it so you have:
+
+```
+data/name-that-llm/train.csv
+data/name-that-llm/test.csv
+data/name-that-llm/sample_submission.parquet
+```
+
+With the Kaggle CLI: `kaggle competitions download -c name-that-llm -p data && unzip data/name-that-llm.zip -d data/name-that-llm`
+
+## Branches
+
+| Branch | Owner |
+|---|---|
+| `main` | shared, reviewed work only |
+| `cecce-pizza` | Cecce |
+| `liam-pizza` | Liam |
+| `kazik-pizza` | Kazik |
+
+## How we work
+
+- **Don't commit straight to `main`.** Work on your branch (or a short-lived task branch like `part1-ensemble`), push it, and open a pull request. A teammate looks it over before merging.
+- **Pull often, commit small.** `git pull` before you start; avoid two people editing the same notebook at once.
+- **Same environment for everyone.** Add packages with `uv add <pkg>` and commit the updated `pyproject.toml` and `uv.lock`. Everyone else runs `uv sync`.
+- **No data, outputs or secrets in git.** Data goes in `data/`, results in `outputs/` (both ignored). Never commit API keys or `kaggle.json`.
+- **Strip notebook outputs before committing** to avoid merge conflicts: `uv run nbstripout --install` once per clone (after `uv add --dev nbstripout`).
+- **Course updates:** when the instructors push new parts, run `git pull upstream main` on `main` and push.
+
+---
+
+# Course README
+
 We are using python 3.14, here is how you reproduce our setup.
 
 ```bash

@@ -1,0 +1,13 @@
+# Data (Kaggle competition files, not tracked)
+data/
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+outputs/
