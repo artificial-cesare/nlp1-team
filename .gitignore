@@ -1,6 +1,7 @@
 # Data (Kaggle competition files, not tracked)
 data/
 *.zip
+graphs/
 
 # Python
 __pycache__/
