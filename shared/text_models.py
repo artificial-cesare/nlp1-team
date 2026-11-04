@@ -32,7 +32,7 @@ DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
 TRANSFORMER_GRID = {"d_model": [128, 256], "lr": [5e-4]}
 TRANSFORMER_FIXED = {"layers": 2, "heads": 4, "dropout": 0.1, "weight_decay": 0.01, "batch_size": 32,
                      "max_epochs": 60, "patience": 8, "min_freq": 2, "max_len": 512, "tokenizer": "roberta-bpe"}
-FINETUNE_FIXED = {"model_id": "rrivera1849/LUSR", "lr": 2e-5, "head_lr": 1e-3, "weight_decay": 0.01, "epochs": 5,
+FINETUNE_FIXED = {"model_id": "rrivera1849/LUSR", "lr": 2e-5, "head_lr": 1e-3, "weight_decay": 0.01, "epochs": 5,  # 10 in the final run
                   "batch_size": 16, "warmup": 0.1, "max_len": 512}
 
 
@@ -172,14 +172,20 @@ class FinetuneClassifier:
         for ep in range(1, p["epochs"] + 1):
             model.train()
             perm = rng.permutation(len(texts_tr))
+            losses = []
             for i, ids, am in self._batches(texts_tr[perm], p["batch_size"]):
                 opt.zero_grad()
-                lossf(model(ids, am), yt[perm[i : i + p["batch_size"]]].to(DEVICE)).backward()
+                loss = lossf(model(ids, am), yt[perm[i : i + p["batch_size"]]].to(DEVICE))
+                loss.backward()
+                losses.append(loss.item())
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step()
                 sched.step()
-            val = balanced_accuracy_score(y_va, self._logits(model, list(texts_va)).argmax(1).numpy())
-            self.history_.append(val)
+            val_logits = self._logits(model, list(texts_va))
+            val = balanced_accuracy_score(y_va, val_logits.argmax(1).numpy())
+            val_loss = lossf(val_logits, torch.as_tensor(y_va)).item()
+            self.history_.append({"epoch": ep, "train_loss": float(np.mean(losses)), "val_loss": val_loss,
+                                  "val_bal_acc": val})
             if val > best:
                 best, self.best_epoch_ = val, ep
                 state = {k: v.detach().to("cpu", copy=True) for k, v in model.state_dict().items()}
@@ -229,7 +235,8 @@ def run_cv_text(texts, y, groups, folds, kind: str, grid: dict | None = None, na
         proba = est.predict_proba([data[i] for i in te])
         pred = proba.argmax(1)
         rows.append({"repeat": r, "fold": k, **H.scores(y[te], pred), "inner_val": est.val_score_, "params": p,
-                     "epochs": est.best_epoch_, "n_test": len(te), "n_total": len(tr) + len(te)})
+                     "epochs": est.best_epoch_, "n_test": len(te), "n_total": len(tr) + len(te),
+                     "history": getattr(est, "history_", None)})
         if r == 0:
             oof_pred[te], oof_proba[te] = pred, proba
         if hasattr(est, "release"):
@@ -238,7 +245,7 @@ def run_cv_text(texts, y, groups, folds, kind: str, grid: dict | None = None, na
             print(f"  fold {r}.{k}: bal.acc {rows[-1]['balanced_accuracy']:.4f} (epoch {est.best_epoch_}, {p}) "
                   f"{time.time() - t0:.0f}s")
     res = {"name": name or kind, "model": kind, "folds": rows, "oof_pred": oof_pred, "oof_proba": oof_proba,
-           "seconds": time.time() - t0, "runs": len({f[0] for f in folds})}
+           "seconds": time.time() - t0, "runs": len({f[0] for f in folds}), "fixed": fixed}
     if verbose:
         ba = H.fold_scores(res)
         print(f"{res['name']:28s} bal.acc {ba.mean():.4f} ± {ba.std():.4f}  ({len(rows)} folds, {res['seconds']:.0f}s)")

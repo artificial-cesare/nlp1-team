@@ -5,7 +5,7 @@
     tokenizer_stats(texts)                        # fertility, truncation@512, unk rate, typography round trip
 
 Preprocessing is NFC only (no lowercasing, no stopword or punctuation removal):
-punctuation and typography are authorship cues. See project.ipynb, steps 3-4.
+punctuation and typography are authorship cues. See part1/neural_project.ipynb, steps 3-4.
 """
 
 from __future__ import annotations
@@ -28,6 +28,11 @@ TOKENIZERS = {  # name -> Hugging Face id (or "tutorial")
     "deberta-v3": "microsoft/deberta-v3-base",
     "tutorial-bpe-1k": "tutorial",              # part1.experiment.train_tokenizer on AG News, vocab 1000, min_freq 2
 }
+
+# The tokenisers our models actually use (Kazik: evaluate these). roberta-bpe = LUSR (frozen and fine-tuned) and the
+# from-scratch transformer's vocabulary; qwen3-bpe = Qwen3-0.6B-Base hidden states (and the dropped Qwen3-Embedding).
+# modernbert / deberta-v3 / tutorial-bpe-1k are comparison rows only (step 4).
+USED_TOKENIZERS = ["roberta-bpe", "qwen3-bpe"]
 
 PROBE = "He said “no” — it’s 5 µm…  done"  # curly quotes, em dash, µ, ellipsis, double space
 

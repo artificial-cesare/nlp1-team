@@ -12,7 +12,7 @@ All three tracks (Kazik: EDA and tokenisers; Liam: token indicators and bag-of-w
 | `folds.json` | Stratified 5-fold CV grouped by `prompt_id`, 10 repeats (50 folds), by passage `id` |
 | `results/` | One JSON per system (`<representation>__<model>.json`): per-fold scores, chosen params, out-of-fold predictions. The neural track's results are already here (best: `lusr/logreg`, 35.8% balanced accuracy) |
 
-## Protocol (details and justification: `part1/project.ipynb`, step 2)
+## Protocol (details and justification: `part1/neural_project.ipynb`, step 2)
 
 - **Data:** CV uses Kazik's train split only (2,159 passages, 120 prompts). The test split (540 passages, 30 prompts) is used once, at the end, via `final_test()`.
 - **Folds:** grouped by prompt, because Kaggle's test prompts are unseen. 10 repeats for logistic regression and the MLPs; costly neural models use the first repeat only, and `compare()` then pairs them on those 5 folds.

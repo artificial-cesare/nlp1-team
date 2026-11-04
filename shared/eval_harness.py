@@ -5,7 +5,7 @@ through this file, so all comparisons use the same folds, models, grids and
 Bayesian test. Input: a feature matrix X (dense numpy or scipy sparse) whose rows
 are aligned with Kazik's train split (`data/name-that-llm/split_train.csv`).
 
-Protocol (see project.ipynb, step 2):
+Protocol (see part1/neural_project.ipynb, step 2):
 - Folds: StratifiedGroupKFold(5) grouped by prompt_id, repeated R times
   (different shuffles). Saved in shared/folds.json, keyed by passage id.
 - Tuning: nested. Inside each outer training fold we hold out 20% of the
