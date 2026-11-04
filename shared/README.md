@@ -5,7 +5,7 @@ All three tracks (Kazik: EDA and tokenisers; Liam: token indicators and bag-of-w
 | File | What it gives you |
 |---|---|
 | `data.py` | `load_data()`: Kazik's train/test split (rebuilt identically if the CSVs are missing), labels `D.y`, prompt groups `D.groups`, `D.classes`, `D.class_order` (by family), `family()`, `FAMILY_COLOR`, `length_features()` |
-| `tokenization.py` | `preprocess()` (NFC only), `tokenize(texts, name)`, `tokenizer_stats()`, the `TOKENIZERS` registry |
+| `tokenization.py` | `preprocess()` (NFC only), `tokenize(texts, name)`, `tokenizer_stats()`, the `TOKENIZERS` registry. `OURS_TOKENIZERS` = Kazik's BPEs (`ours-bpe-2k`, `-4k`, `-8k`; built from `part1/tok.py` on first use, cached in `cache/`) |
 | `eval_harness.py` | `load_folds()`, `MODELS` (model specs and hyperparameter grids), `run_cv()` (nested CV, parallel over folds), `compare()` (Bayesian correlated t-test, ROPE = 1 pp), `final_test()`, `save_result()` / `load_results()` |
 | `analysis.py` | `results_table`, `comparison_table`, `plot_posteriors`, `plot_confusion` (family-ordered), `family_errors`, `per_class_f1`, `accuracy_by_length`, `misclassified` |
 | `text_models.py` | Neural-track models that read text directly: `run_cv_text(..., "transformer" or "finetune")` (tiny transformer from scratch; fine-tuned LUSR) and `final_test_text()`; same result format as `run_cv` |
