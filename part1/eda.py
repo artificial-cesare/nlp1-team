@@ -731,3 +731,217 @@ def plot_model_heatmap(
     if show:
         plt.show()
     return ax
+
+
+# --------------------------------------------------------------------------- #
+# Distinctive vocabulary: log-odds ratio with informative Dirichlet prior
+# (Monroe, Colaresi & Quinn, 2008, "Fightin' Words")
+# --------------------------------------------------------------------------- #
+VOCAB_TOKEN_PATTERN = r"(?u)\b[a-z]+(?:'[a-z]+)?\b"
+
+
+def _normalise_for_vocab(s: str) -> str:
+    """Lowercase and map curly quotes to straight ones, so "it’s" and "it's" are the same word here
+    (quote style is analysed separately)."""
+    return s.lower().replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+
+
+def _log_odds_z(counts: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Z-scores of each group (row) vs.
+
+    all other rows, per term (column).
+    """
+    a0 = alpha.sum()
+    total = counts.sum(axis=0)
+    n = counts.sum(axis=1, keepdims=True)
+    y_i, y_j = counts, total - counts
+    n_i, n_j = n, n.sum() - n
+    l_i = np.log((y_i + alpha) / (n_i + a0 - y_i - alpha))
+    l_j = np.log((y_j + alpha) / (n_j + a0 - y_j - alpha))
+    var = 1.0 / (y_i + alpha) + 1.0 / (y_j + alpha)
+    return (l_i - l_j) / np.sqrt(var)
+
+
+def _distinctive_block(
+    texts: pd.Series,
+    groups: pd.Series,
+    *,
+    vec_kwargs: dict,
+    k: int,
+    prior_scale: float,
+    min_count: int,
+    min_docs: int,
+) -> pd.DataFrame:
+    from scipy import sparse
+    from sklearn.feature_extraction.text import CountVectorizer
+
+    vec = CountVectorizer(**vec_kwargs)
+    X = vec.fit_transform(texts)
+    vocab = vec.get_feature_names_out()
+
+    levels = sorted(groups.unique())
+    codes = pd.Categorical(groups, categories=levels).codes
+    ind = sparse.csr_matrix(
+        (np.ones(len(codes)), (codes, np.arange(len(codes)))),
+        shape=(len(levels), len(codes)),
+    )
+    counts = np.asarray((ind @ X).todense(), dtype=float)
+    docs = np.asarray((ind @ (X > 0).astype(float)).todense())
+    n_resp = np.bincount(codes, minlength=len(levels))
+
+    keep = counts.sum(axis=0) >= min_count
+    counts, docs, vocab = counts[:, keep], docs[:, keep], vocab[keep]
+    if counts.shape[1] == 0:
+        return pd.DataFrame()
+
+    alpha = prior_scale * counts.sum(axis=0)
+    z = _log_odds_z(counts, alpha)
+
+    n_tok = counts.sum(axis=1)
+    rest_counts = counts.sum(axis=0) - counts
+    rest_tok = n_tok.sum() - n_tok
+
+    rows = []
+    for g, level in enumerate(levels):
+        ok = np.where((docs[g] >= min_docs) & (z[g] > 0))[0]
+        top = ok[np.argsort(-z[g, ok])][:k]
+        for rank, t in enumerate(top, start=1):
+            rows.append(
+                {
+                    "group": level,
+                    "rank": rank,
+                    "term": vocab[t],
+                    "z": z[g, t],
+                    "count": int(counts[g, t]),
+                    "per10k": counts[g, t] / n_tok[g] * 1e4,
+                    "per10k_rest": rest_counts[g, t] / rest_tok[g] * 1e4,
+                    "n_responses": int(docs[g, t]),
+                    "share_responses": docs[g, t] / n_resp[g],
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def distinctive_terms(
+    df: pd.DataFrame,
+    group_col: str = "model",
+    text_col: str = "text",
+    *,
+    within: str | None = None,
+    k: int = 10,
+    ngram_range: tuple[int, int] = (1, 1),
+    stop_words: str | list[str] | None = None,
+    prior_scale: float = 0.1,
+    min_count: int = 10,
+    min_docs: int = 5,
+) -> pd.DataFrame:
+    """Most over-used terms per group, ranked by log-odds z-score.
+
+    Each group (e.g. a model) is compared against all other rows; with
+    ``within="family"`` each model is compared only against the other models
+    of its own family (single-model families are skipped). This is the
+    comparison that matters once punctuation has identified the family.
+
+    The prior is ``prior_scale`` x the corpus counts of each term (an
+    informative Dirichlet prior), which shrinks rare terms towards zero.
+    |z| > 1.96 is roughly significant, but with thousands of terms treat z as a
+    ranking, not a test.
+
+    Filters: a term must occur ``min_count`` times overall and in at least
+    ``min_docs`` of the group's responses, so a word from a single prompt
+    can't top the list. Because every model answers the same prompts, topic
+    words largely cancel out and what is left is style.
+
+    Columns: ``group, rank, term, z, count, per10k`` (rate per 10,000 tokens in
+    the group), ``per10k_rest`` (in the comparison set), ``n_responses`` and
+    ``share_responses`` (responses of the group that contain the term), plus
+    ``family`` when ``within`` is used.
+    """
+    vec_kwargs = dict(
+        token_pattern=VOCAB_TOKEN_PATTERN,
+        lowercase=False,  # done in _normalise_for_vocab
+        ngram_range=ngram_range,
+        stop_words=stop_words,
+    )
+    params = dict(
+        vec_kwargs=vec_kwargs,
+        k=k,
+        prior_scale=prior_scale,
+        min_count=min_count,
+        min_docs=min_docs,
+    )
+    d = df.dropna(subset=[text_col, group_col])
+    texts = d[text_col].map(_normalise_for_vocab)
+
+    if within is None:
+        return _distinctive_block(texts, d[group_col], **params)
+
+    parts = []
+    for fam, idx in d.groupby(within).groups.items():
+        sub = d.loc[idx]
+        if sub[group_col].nunique() < 2:
+            continue
+        block = _distinctive_block(texts.loc[idx], sub[group_col], **params)
+        if not block.empty:
+            parts.append(block.assign(family=fam))
+    if not parts:
+        return pd.DataFrame()
+    out = pd.concat(parts, ignore_index=True)
+    return out[["family"] + [c for c in out.columns if c != "family"]]
+
+
+def top_terms_summary(table: pd.DataFrame, k: int | None = None) -> pd.DataFrame:
+    """One row per group with its top terms as a comma-separated string."""
+    t = table if k is None else table[table["rank"] <= k]
+    keys = ["family", "group"] if "family" in t.columns else ["group"]
+    return (
+        t.sort_values(keys + ["rank"])
+        .groupby(keys, sort=True)["term"]
+        .agg(", ".join)
+        .rename("top terms")
+        .to_frame()
+    )
+
+
+def plot_distinctive_terms(
+    table: pd.DataFrame,
+    groups: list[str] | None = None,
+    *,
+    k: int = 10,
+    col_wrap: int = 3,
+    palette: dict | None = None,
+    group_to_colour: dict | None = None,
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    show: bool = True,
+):
+    """Small multiples: horizontal bars of the top-``k`` z-scores per group.
+
+    ``group_to_colour`` maps each group to a colour key in ``palette`` (e.g.
+    ``model -> family`` with a family palette), so bars share family colours.
+    """
+    groups = groups or sorted(table["group"].unique())
+    n = len(groups)
+    ncols = min(col_wrap, n)
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(4.2 * ncols, 0.32 * k * nrows + 1.2 * nrows),
+        squeeze=False,
+    )
+    for ax, g in zip(axes.flat, groups):
+        sub = table[(table["group"] == g) & (table["rank"] <= k)].sort_values("z")
+        colour = "#4C72B0"
+        if palette and group_to_colour:
+            colour = palette.get(group_to_colour.get(g), colour)
+        ax.barh(sub["term"], sub["z"], color=colour)
+        ax.set_title(g, fontsize=10)
+        ax.tick_params(axis="y", labelsize=9)
+        ax.set_xlabel("log-odds z", fontsize=9)
+    for ax in list(axes.flat)[n:]:
+        ax.set_visible(False)
+    if title:
+        fig.suptitle(title)
+    _finish(fig, save_path, show)
+    return axes  # not fig: Jupyter would display a returned Figure a second time
