@@ -3,7 +3,7 @@
 - `TinyTransformer`: trained from scratch on token ids (2 layers, pre-LayerNorm, masked mean pooling, linear softmax).
   Vocabulary = RoBERTa byte-level BPE ids seen at least `min_freq` times in the training fold; others -> [UNK].
 - `FinetuneClassifier`: a pretrained encoder (default LUSR) + mean pooling + linear head, all weights trained
-  (the setup of Sun et al. 2025).
+  (the setup of Sun et al. 2025), or only the top `train_layers` layers + head; `head_dropout` before the head.
 
 Protocol: for each outer fold, train on the inner-train part, pick the best epoch on the grouped inner validation
 set (early stopping), and score that checkpoint once on the outer fold. There is no refit, so each fold costs one
@@ -32,7 +32,8 @@ DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
 TRANSFORMER_GRID = {"d_model": [128, 256], "lr": [5e-4]}
 TRANSFORMER_FIXED = {"layers": 2, "heads": 4, "dropout": 0.1, "weight_decay": 0.01, "batch_size": 32,
                      "max_epochs": 60, "patience": 8, "min_freq": 2, "max_len": 512, "tokenizer": "roberta-bpe"}
-FINETUNE_FIXED = {"model_id": "rrivera1849/LUSR", "lr": 2e-5, "head_lr": 1e-3, "weight_decay": 0.01, "epochs": 5,  # 10 in the final run
+FINETUNE_FIXED = {"model_id": "rrivera1849/LUSR", "lr": 2e-5, "head_lr": 1e-3, "weight_decay": 0.01, "epochs": 5,
+                  "train_layers": None, "head_dropout": 0.0,  # None = train all 12 layers; k = freeze all but the top k  # 10 in the final run
                   "batch_size": 16, "warmup": 0.1, "max_len": 512}
 
 
@@ -122,17 +123,34 @@ class TransformerClassifier:
 
 # --------------------------------------------------------------------------- fine-tuned pretrained encoder
 class _EncoderHead(nn.Module):
-    def __init__(self, model_id, n_classes):
+    def __init__(self, model_id, n_classes, train_layers=None, head_dropout=0.0):
         super().__init__()
         from transformers import AutoModel
 
         self.enc = AutoModel.from_pretrained(model_id)
+        self.drop = nn.Dropout(head_dropout)
         self.head = nn.Linear(self.enc.config.hidden_size, n_classes)
+        if train_layers is not None:  # freeze embeddings and all but the top `train_layers` transformer layers
+            for prm in self.enc.parameters():
+                prm.requires_grad = False
+            n = len(self.enc.encoder.layer)
+            self.frozen = [self.enc.embeddings, *self.enc.encoder.layer[: n - train_layers]]
+            for layer in self.enc.encoder.layer[n - train_layers:]:
+                for prm in layer.parameters():
+                    prm.requires_grad = True
+        else:
+            self.frozen = []
+
+    def train(self, mode=True):
+        super().train(mode)
+        for m in self.frozen:  # frozen parts stay in eval mode: no dropout (MPS attention cannot use it without grad)
+            m.eval()
+        return self
 
     def forward(self, input_ids, attention_mask):
         h = self.enc(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
         m = attention_mask.unsqueeze(-1).float()
-        return self.head((h * m).sum(1) / m.sum(1))  # mean pooling, as for the frozen LUSR embedding
+        return self.head(self.drop((h * m).sum(1) / m.sum(1)))  # mean pooling, as for the frozen LUSR embedding
 
 
 class FinetuneClassifier:
@@ -160,8 +178,9 @@ class FinetuneClassifier:
         torch.manual_seed(seed)
         rng = np.random.default_rng(seed)
         self.tok_ = AutoTokenizer.from_pretrained(p["model_id"])
-        model = _EncoderHead(p["model_id"], n_classes).to(DEVICE)
-        opt = torch.optim.AdamW([{"params": model.enc.parameters(), "lr": p["lr"]},
+        model = _EncoderHead(p["model_id"], n_classes, p["train_layers"], p["head_dropout"]).to(DEVICE)
+        self.n_trainable_ = sum(q.numel() for q in model.parameters() if q.requires_grad)
+        opt = torch.optim.AdamW([{"params": [q for q in model.enc.parameters() if q.requires_grad], "lr": p["lr"]},
                                  {"params": model.head.parameters(), "lr": p["head_lr"]}],
                                 weight_decay=p["weight_decay"])
         steps = p["epochs"] * math.ceil(len(texts_tr) / p["batch_size"])
@@ -217,7 +236,8 @@ def run_cv_text(texts, y, groups, folds, kind: str, grid: dict | None = None, na
         grid, make = _grid(grid or TRANSFORMER_GRID), lambda p: TransformerClassifier(**fixed, **p)
     else:
         data = texts
-        grid, make = _grid(grid or {"lr": [FINETUNE_FIXED["lr"]]}), lambda p: FinetuneClassifier(**fixed, **p)
+        grid = _grid(grid or {"lr": [fixed.get("lr", FINETUNE_FIXED["lr"])]})
+        make = lambda p: FinetuneClassifier(**{**fixed, **p})
     rows, oof_pred, oof_proba, t0 = [], np.full(len(y), -1), np.zeros((len(y), n_classes)), time.time()
     for r, k, tr, te in folds:
         H.set_seed(H.SEED + r)
