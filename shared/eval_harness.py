@@ -15,6 +15,12 @@ Protocol (see project.ipynb, step 2):
   the chosen number of epochs.
 - Metric: balanced accuracy (Kaggle metric); accuracy and macro-F1 also reported.
 - Comparison: Bayesian correlated t-test (Benavoli et al. 2017), rho = n_test / n_total.
+
+Usage (any representation X whose rows align with shared.data.load_data().train):
+    from shared.data import load_data
+    from shared import eval_harness as H
+    D = load_data(); FOLDS = H.load_folds(D.train["id"].tolist())
+    res = H.run_cv(X, D.y, D.groups, FOLDS, "logreg", name="bow/logreg"); H.save_result(res)
 """
 
 from __future__ import annotations
@@ -220,7 +226,7 @@ class ModelSpec:
 
 
 MODELS = {
-    "logreg": ModelSpec("logreg", lambda p, s: _logreg(p["C"], s), {"C": [1e-3, 1e-2, 1e-1, 1.0]}),
+    "logreg": ModelSpec("logreg", lambda p, s: _logreg(p["C"], s), {"C": [1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0]}),
     "logreg_ovr": ModelSpec("logreg_ovr", lambda p, s: _logreg_ovr(p["C"], s), {"C": [1e-2]}),
     "mlp": ModelSpec(
         "mlp",
@@ -238,6 +244,10 @@ MODELS = {
 
 
 # --------------------------------------------------------------------------- CV loop
+def _spec(model: str, grid: dict | None) -> ModelSpec:
+    return MODELS[model] if grid is None else ModelSpec(model, MODELS[model].build, grid, MODELS[model].neural)
+
+
 def _fit_eval_inner(spec, params, X, y, tr, va, sparse):
     est = spec.build(params, sparse)
     if spec.neural:
@@ -247,43 +257,97 @@ def _fit_eval_inner(spec, params, X, y, tr, va, sparse):
     return balanced_accuracy_score(y[va], est.predict(X[va])), None
 
 
-def run_cv(X, y, groups, folds, model: str, grid: dict | None = None, verbose: bool = True) -> dict:
-    """Nested CV of one model on one representation.
+def fit_tuned(spec, X, y, groups, tr, seed: int = SEED):
+    """Nested tuning inside the index set `tr`, then refit on all of `tr`. Returns (estimator, info)."""
+    sparse = sp.issparse(X)
+    itr, iva = inner_split(tr, groups, seed=seed)
+    if len(spec.params) > 1 or spec.neural:
+        res = [(_fit_eval_inner(spec, p, X, y, itr, iva, sparse), p) for p in spec.params]
+        (best_val, best_ep), best_p = max(res, key=lambda t: t[0][0])
+    else:
+        best_p, best_val, best_ep = spec.params[0], np.nan, None
+    est = spec.build(best_p, sparse)
+    if spec.neural:
+        est.epochs = best_ep  # refit on all of `tr` for the selected number of epochs
+    est.fit(X[tr], y[tr])
+    return est, {"inner_val": best_val, "params": best_p, "epochs": best_ep}
+
+
+def _one_fold(spec, X, y, groups, r, k, tr, te):
+    torch.set_num_threads(1)
+    set_seed(SEED + r)
+    est, info = fit_tuned(spec, X, y, groups, tr, seed=SEED + r)
+    pred = est.predict(X[te])
+    proba = est.predict_proba(X[te]) if hasattr(est, "predict_proba") else None
+    row = {"repeat": r, "fold": k, **scores(y[te], pred), **info, "n_test": len(te), "n_total": len(tr) + len(te)}
+    return row, te, pred, proba
+
+
+def run_cv(X, y, groups, folds, model: str, grid: dict | None = None, name: str | None = None,
+           n_jobs: int = -1, verbose: bool = True) -> dict:
+    """Nested CV of one model on one representation; folds run in parallel (n_jobs).
 
     folds: output of load_folds. Returns per-fold metrics, chosen params and out-of-fold predictions
-    (for repeat 0) so all analyses use the same predictions.
+    for repeat 0 (so all analyses use the same predictions). Results are deterministic for any n_jobs.
     """
-    spec = MODELS[model] if grid is None else ModelSpec(model, MODELS[model].build, grid, MODELS[model].neural)
+    from joblib import Parallel, delayed
+
+    spec = _spec(model, grid)
     y, groups = np.asarray(y), np.asarray(groups)
-    sparse = sp.issparse(X)
-    X = X.tocsr() if sparse else np.asarray(X)
-    rows, oof_pred, oof_proba = [], np.full(len(y), -1), np.zeros((len(y), int(y.max()) + 1))
+    X = X.tocsr() if sp.issparse(X) else np.asarray(X)
     t0 = time.time()
-    for r, k, tr, te in folds:
-        set_seed(SEED + r)
-        itr, iva = inner_split(tr, groups, seed=SEED + r)
-        if len(spec.params) > 1 or spec.neural:
-            res = [(_fit_eval_inner(spec, p, X, y, itr, iva, sparse), p) for p in spec.params]
-            (best_val, best_ep), best_p = max(res, key=lambda t: t[0][0])
-        else:
-            best_p, best_val, best_ep = spec.params[0], np.nan, None
-        est = spec.build(best_p, sparse)
-        if spec.neural:
-            est.epochs = best_ep  # refit on the full outer-train fold for the selected number of epochs
-        est.fit(X[tr], y[tr])
-        pred = est.predict(X[te])
-        rows.append({"repeat": r, "fold": k, **scores(y[te], pred), "inner_val": best_val, "params": best_p,
-                     "epochs": best_ep, "n_test": len(te), "n_total": len(tr) + len(te)})
-        if r == 0:
+    out = Parallel(n_jobs=n_jobs)(delayed(_one_fold)(spec, X, y, groups, *f) for f in folds)
+    rows = [o[0] for o in out]
+    oof_pred, oof_proba = np.full(len(y), -1), np.zeros((len(y), int(y.max()) + 1))
+    for row, te, pred, proba in out:
+        if row["repeat"] == 0:
             oof_pred[te] = pred
-            if hasattr(est, "predict_proba"):
-                oof_proba[te] = est.predict_proba(X[te])
+            if proba is not None:
+                oof_proba[te] = proba
     secs = time.time() - t0
-    out = {"model": model, "folds": rows, "oof_pred": oof_pred, "oof_proba": oof_proba, "seconds": secs,
-           "runs": len({f[0] for f in folds})}
+    res = {"name": name or model, "model": model, "folds": rows, "oof_pred": oof_pred, "oof_proba": oof_proba,
+           "seconds": secs, "runs": len({f[0] for f in folds})}
     if verbose:
-        ba = np.array([f["balanced_accuracy"] for f in rows])
-        print(f"{model:12s} bal.acc {ba.mean():.4f} ± {ba.std():.4f}  ({len(rows)} folds, {secs:.0f}s)")
+        ba = fold_scores(res)
+        print(f"{res['name']:28s} bal.acc {ba.mean():.4f} ± {ba.std():.4f}  ({len(rows)} folds, {secs:.0f}s)")
+    return res
+
+
+def final_test(X_train, y, groups, X_test, y_test, model: str, grid: dict | None = None) -> dict:
+    """The single held-out evaluation: tune on an inner grouped split of the full train split, refit, score test."""
+    set_seed(SEED)
+    spec = _spec(model, grid)
+    X_train = X_train.tocsr() if sp.issparse(X_train) else np.asarray(X_train)
+    est, info = fit_tuned(spec, X_train, np.asarray(y), np.asarray(groups), np.arange(len(y)))
+    pred = est.predict(X_test)
+    return {"model": model, **scores(y_test, pred), **info, "pred": pred}
+
+
+def subset_repeats(result: dict, repeats: int) -> dict:
+    """Restrict a run_cv result to its first `repeats` repeats (to pair it with a costlier model)."""
+    return {**result, "folds": [f for f in result["folds"] if f["repeat"] < repeats], "runs": repeats}
+
+
+# --------------------------------------------------------------------------- persistence
+RESULTS_DIR = Path(__file__).with_name("results")
+
+
+def save_result(result: dict, path: Path | None = None) -> Path:
+    """Save a run_cv result as JSON (shared/results/<name>.json) so teammates can compare against it."""
+    path = Path(path or RESULTS_DIR / f"{result['name'].replace('/', '__')}.json")
+    path.parent.mkdir(exist_ok=True)
+    result = {**result, "oof_proba": np.round(np.asarray(result["oof_proba"]), 4)}
+    conv = lambda o: o.tolist() if isinstance(o, np.ndarray) else (o.item() if isinstance(o, np.generic) else str(o))
+    path.write_text(json.dumps(result, default=conv))
+    return path
+
+
+def load_results(pattern: str = "*.json", path: Path = RESULTS_DIR) -> dict:
+    out = {}
+    for f in sorted(Path(path).glob(pattern)):
+        r = json.loads(f.read_text())
+        r["oof_pred"], r["oof_proba"] = np.array(r["oof_pred"]), np.array(r["oof_proba"])
+        out[r["name"]] = r
     return out
 
 
@@ -311,10 +375,15 @@ def correlated_ttest(a, b, rho: float, rope: float = ROPE) -> dict:
 def compare(res_a: dict, res_b: dict, metric: str = "balanced_accuracy", rope: float = ROPE) -> dict:
     """Compare two run_cv results evaluated on the same folds."""
     fa, fb = res_a["folds"], res_b["folds"]
+    if len(fa) != len(fb):  # pair on the shared repeats (e.g. 10-repeat LR vs 1-repeat fine-tuning)
+        n = min(res_a["runs"], res_b["runs"])
+        res_a, res_b = subset_repeats(res_a, n), subset_repeats(res_b, n)
+        fa, fb = res_a["folds"], res_b["folds"]
     assert [(f["repeat"], f["fold"]) for f in fa] == [(f["repeat"], f["fold"]) for f in fb], "different folds"
     rho = np.mean([f["n_test"] / f["n_total"] for f in fa])
     out = correlated_ttest(fold_scores(res_a, metric), fold_scores(res_b, metric), rho, rope)
-    return {"A": res_a.get("name", res_a["model"]), "B": res_b.get("name", res_b["model"]), "rho": rho, **out}
+    return {"A": res_a.get("name", res_a["model"]), "B": res_b.get("name", res_b["model"]), "rho": rho,
+            "n_folds": len(fa), **out}
 
 
 def timed(fn, *args, **kw):
