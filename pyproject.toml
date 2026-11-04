@@ -3,6 +3,7 @@ name = "nlp1-student"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "accelerate>=1.15.0",
     "baycomp>=1.0.3",
     "certifi>=2026.10.23",
     "datasets>=5.1.0",
@@ -15,8 +16,10 @@ dependencies = [
     "scikit-learn>=1.9.1",
     "scipy>=1.18.1",
     "seaborn>=0.13.2",
+    "sentence-transformers>=6.2.0",
     "tabulate>=0.10.0",
     "tokenizers>=0.23.3",
     "torch>=2.15.0",
     "tqdm>=4.70.1",
+    "transformers>=5.22.1",
 ]
