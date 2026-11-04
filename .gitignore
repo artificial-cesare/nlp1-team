@@ -13,6 +13,9 @@ __pycache__/
 .DS_Store
 outputs/
 
+# Tokeniser / embedding cache, rebuilt from code on first use (as on cecce-pizza)
+cache/
+
 # Kazik's Claude setup files
 CLAUDE.md
 KAZ*
