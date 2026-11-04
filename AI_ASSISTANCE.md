@@ -19,3 +19,4 @@ We disclose AI assistance as the course requires. Tool: Claude Code (Claude Opus
 - 2026-11-04 · next-steps.md: Claude drafted the list of next-week ideas (stacking, likelihood features, chunking, LoRA) from our discussion.
 - 2026-11-04 · Step 6.5c: Claude added partial fine-tuning (freeze all but the top k LUSR layers, head dropout) to shared/text_models.py and ran CV for k = 2 and 4.
 - 2026-11-04 · Per-class analysis: Claude ran Kazik's EDA functions with our results, found the class twins (Fable / GLM) and fingerprints (spaced em dash, curly apostrophes), and tested prompt-centring (+8.3 pp) and one-to-one assignment per prompt (48.2%); notes in next-steps.md.
+- 2026-11-04 · next-steps.md: Claude merged Cesare's list of checks and fine-tuning levers, and ran the two quick checks (family vs within-family accuracy per method; token lengths).
