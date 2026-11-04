@@ -1,0 +1,23 @@
+,A,B,folds,mean B−A,P(A>B),P(ROPE),P(B>A)
+0,lusr/logreg,qwen3-base-L14-mean/logreg,50,-0.0159,0.6418,0.3015,0.0567
+1,lusr/logreg,lusr/logreg_ovr,50,0.0065,0.039,0.6101,0.3509
+2,lusr/logreg,lusr/mlp,50,-0.0072,0.4135,0.498,0.0885
+3,lusr/logreg,lusr/resmlp,50,-0.001,0.2119,0.6249,0.1632
+4,lusr/logreg,qwen3-base-L14-mean/logreg_ovr,50,-0.0132,0.5836,0.3519,0.0645
+5,lusr/logreg,qwen3-base-L14-mean/mlp,50,-0.0158,0.6568,0.3053,0.0379
+6,lusr/logreg,qwen3-base-L14-mean/resmlp,50,-0.0119,0.5472,0.3683,0.0845
+7,lusr/logreg,roberta-ids/transformer,5,-0.1513,0.9984,0.0006,0.001
+8,lusr/logreg,lusr-finetune/finetune,5,-0.0292,0.8196,0.129,0.0514
+9,lusr/logreg,lusr-finetune-10ep/finetune,5,-0.0319,0.7786,0.1319,0.0896
+10,lusr/logreg,lusr-finetune-top2/finetune,5,-0.0194,0.6306,0.2057,0.1637
+11,lusr/logreg,lusr-finetune-top4/finetune,5,-0.0088,0.483,0.2621,0.2549
+12,lusr-finetune-top4/finetune,lusr/logreg_ovr,5,0.0065,0.2313,0.3328,0.4359
+13,lusr/mlp,lusr/resmlp,50,0.0062,0.0655,0.5742,0.3603
+14,lusr-finetune-top2/finetune,lusr/mlp,5,0.0283,0.0658,0.143,0.7912
+15,qwen3-base-L14-mean/resmlp,lusr-finetune-top2/finetune,5,-0.0093,0.4537,0.5315,0.0148
+16,qwen3-base-L14-mean/logreg_ovr,qwen3-base-L14-mean/resmlp,50,0.0013,0.067,0.8088,0.1241
+17,qwen3-base-L14-mean/mlp,qwen3-base-L14-mean/logreg_ovr,50,0.0026,0.1044,0.6673,0.2283
+18,qwen3-base-L14-mean/logreg,qwen3-base-L14-mean/mlp,50,0.0001,0.1968,0.602,0.2012
+19,lusr-finetune/finetune,qwen3-base-L14-mean/logreg,5,0.0032,0.3028,0.3025,0.3947
+20,lusr-finetune-10ep/finetune,lusr-finetune/finetune,5,0.0028,0.2519,0.399,0.3492
+21,roberta-ids/transformer,lusr-finetune-10ep/finetune,5,0.1194,0.0021,0.0018,0.9961
