@@ -945,3 +945,319 @@ def plot_distinctive_terms(
         fig.suptitle(title)
     _finish(fig, save_path, show)
     return axes  # not fig: Jupyter would display a returned Figure a second time
+
+
+# --------------------------------------------------------------------------- #
+# Model similarity: TF-IDF cosine between responses to the same prompt
+# --------------------------------------------------------------------------- #
+WORD_TFIDF_KWARGS: dict = dict(
+    token_pattern=VOCAB_TOKEN_PATTERN,
+    lowercase=False,  # done in _normalise_for_vocab
+    sublinear_tf=True,
+    min_df=2,
+)
+CHAR_TFIDF_KWARGS: dict = dict(
+    analyzer="char",
+    ngram_range=(2, 4),
+    lowercase=False,  # keep case, punctuation and quote style
+    sublinear_tf=True,
+    min_df=2,
+)
+
+
+def within_prompt_similarity(
+    df: pd.DataFrame,
+    *,
+    text_col: str = "text",
+    model_col: str = "model",
+    prompt_col: str = "prompt_id",
+    analyzer: str = "word",
+    idf: str = "global",
+    vec_kwargs: dict | None = None,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Mean TF-IDF cosine similarity between models, compared only within prompts.
+
+    With ``idf="global"`` one TF-IDF vectoriser (vocabulary + IDF) is fitted on
+    all responses in ``df``, so every prompt is embedded in the same space (as a
+    classifier would see it). With ``idf="prompt"`` a separate vectoriser is
+    fitted on each prompt's responses, so words that every model uses for that
+    prompt are down-weighted (robustness check). For each prompt answered by
+    every model, the cosine similarity between the models' responses gives a
+    k x k matrix; the result is the mean over those prompts. Prompts missing a
+    response are skipped, as in :func:`friedman_test`.
+
+    ``analyzer="word"`` uses lowercased word unigrams with curly apostrophes
+    merged (as in :func:`distinctive_terms`); ``analyzer="char"`` uses raw
+    character 2-4-grams, which keep punctuation, case and quote style.
+    ``vec_kwargs`` overrides the defaults.
+
+    Returns ``(mean_sim, per_prompt)``: a model x model DataFrame (diagonal = 1)
+    and the stacked per-prompt matrices, shape ``(n_prompts, k, k)``.
+    """
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    if analyzer == "word":
+        kwargs = {**WORD_TFIDF_KWARGS, **(vec_kwargs or {})}
+        texts = df[text_col].map(_normalise_for_vocab)
+    elif analyzer == "char":
+        kwargs = {**CHAR_TFIDF_KWARGS, **(vec_kwargs or {})}
+        texts = df[text_col]
+    else:
+        raise ValueError("analyzer must be 'word' or 'char'")
+    if idf not in {"global", "prompt"}:
+        raise ValueError("idf must be 'global' or 'prompt'")
+
+    X = TfidfVectorizer(**kwargs).fit_transform(texts) if idf == "global" else None
+    models = sorted(df[model_col].unique())
+    pos = np.arange(len(df))
+
+    mats = []
+    for _, idx in df.groupby(prompt_col).indices.items():
+        sub = df.iloc[idx]
+        if sub[model_col].nunique() < len(models) or len(sub) != len(models):
+            continue
+        order = pos[idx][np.argsort(sub[model_col].to_numpy())]  # rows in model order
+        if idf == "global":
+            Xp = X[order]  # rows are L2-normalised
+        else:
+            Xp = TfidfVectorizer(**{**kwargs, "min_df": 1}).fit_transform(texts.iloc[order])
+        mats.append(cosine_similarity(Xp))
+    per_prompt = np.stack(mats)
+    mean_sim = pd.DataFrame(per_prompt.mean(axis=0), index=models, columns=models)
+    mean_sim.index.name = mean_sim.columns.name = model_col
+    return mean_sim, per_prompt
+
+
+def double_centre(sim: pd.DataFrame) -> pd.DataFrame:
+    """Remove each model's overall similarity level from a similarity matrix.
+
+    Some models are similar to everyone ("hubs"), others to no one. Double
+    centring (``s_ij - mean_i - mean_j + grand mean``, off-diagonal means)
+    keeps only pair-specific affinity: 0 = as similar as the two models'
+    general levels predict. The diagonal is set to 1 for plotting.
+    """
+    s = sim.to_numpy(dtype=float, copy=True)
+    np.fill_diagonal(s, np.nan)
+    row = np.nanmean(s, axis=1)
+    c = s - row[:, None] - row[None, :] + np.nanmean(s)
+    np.fill_diagonal(c, 1.0)
+    return pd.DataFrame(c, index=sim.index, columns=sim.columns)
+
+
+def family_similarity_table(sim: pd.DataFrame, model_to_family: dict) -> pd.DataFrame:
+    """Family x family mean of the model similarities (diagonal excludes self-pairs).
+
+    Single-model families have no within-family pair, so their diagonal is NaN.
+    """
+    fams = pd.Series(model_to_family).loc[sim.index].to_numpy()
+    s = sim.to_numpy().copy()
+    np.fill_diagonal(s, np.nan)
+    levels = sorted(set(fams))
+    out = pd.DataFrame(index=levels, columns=levels, dtype=float)
+    for a in levels:
+        for b in levels:
+            block = s[np.ix_(fams == a, fams == b)]
+            out.loc[a, b] = np.nanmean(block) if np.isfinite(block).any() else np.nan
+    return out
+
+
+def family_similarity_permutation_test(
+    sim: pd.DataFrame,
+    model_to_family: dict,
+    *,
+    n_perm: int = 10_000,
+    seed: int = 0,
+) -> tuple[dict, pd.DataFrame]:
+    """Are models in the same family more similar than models in different families?
+
+    Statistic: mean similarity over same-family model pairs minus mean over
+    different-family pairs (upper triangle of ``sim``, self-pairs excluded). The
+    null distribution comes from shuffling family labels across models (family
+    sizes fixed), which permutes whole rows and columns of the matrix together
+    (a Mantel-style test), so the dependence between pairs that share a model is
+    kept.
+
+    Returns ``(overall, per_family)``. ``overall`` holds the within / between
+    means, their difference, the null mean and the one-sided p-value.
+    ``per_family`` has, for each family with 2+ models, its mean within-family
+    similarity and the permutation p-value for that family's label (how often
+    a random set of the same size is at least as similar).
+    """
+    models = list(sim.index)
+    fams = pd.Series(model_to_family).loc[models]
+    codes, levels = pd.factorize(fams)
+    s = sim.to_numpy()
+    iu = np.triu_indices(len(models), k=1)
+    pair_sim = s[iu]
+
+    def stats(labels: np.ndarray) -> tuple[float, np.ndarray]:
+        same = labels[iu[0]] == labels[iu[1]]
+        diff = pair_sim[same].mean() - pair_sim[~same].mean()
+        per_fam = np.array(
+            [
+                pair_sim[same & (labels[iu[0]] == f)].mean() if sizes[f] > 1 else np.nan
+                for f in range(len(levels))
+            ]
+        )
+        return diff, per_fam
+
+    sizes = np.bincount(codes)
+    same_obs = codes[iu[0]] == codes[iu[1]]
+    obs_diff, obs_fam = stats(codes)
+
+    rng = np.random.default_rng(seed)
+    null_diff = np.empty(n_perm)
+    null_fam = np.empty((n_perm, len(levels)))
+    for i in range(n_perm):
+        null_diff[i], null_fam[i] = stats(rng.permutation(codes))
+
+    overall = {
+        "within_mean": float(pair_sim[same_obs].mean()),
+        "between_mean": float(pair_sim[~same_obs].mean()),
+        "diff": float(obs_diff),
+        "diff_chance": float(null_diff.mean()),
+        "diff_null_sd": float(null_diff.std()),
+        "p": float((np.sum(null_diff >= obs_diff) + 1) / (n_perm + 1)),
+        "n_within_pairs": int(same_obs.sum()),
+        "n_between_pairs": int((~same_obs).sum()),
+        "n_perm": n_perm,
+    }
+    rows = []
+    for f, fam in enumerate(levels):
+        if sizes[f] < 2:
+            continue
+        rows.append(
+            {
+                "family": fam,
+                "n_models": int(sizes[f]),
+                "within_mean": obs_fam[f],
+                "chance_mean": float(np.nanmean(null_fam[:, f])),
+                "p": float((np.sum(null_fam[:, f] >= obs_fam[f]) + 1) / (n_perm + 1)),
+            }
+        )
+    return overall, pd.DataFrame(rows).set_index("family")
+
+
+def nearest_neighbours(sim: pd.DataFrame, model_to_family: dict) -> pd.DataFrame:
+    """Most similar other model for each model, and whether it is in the same family."""
+    a = sim.to_numpy(copy=True)
+    np.fill_diagonal(a, -np.inf)
+    s = pd.DataFrame(a, index=sim.index, columns=sim.columns)
+    nn = s.idxmax(axis=1)
+    out = pd.DataFrame(
+        {
+            "family": [model_to_family[m] for m in s.index],
+            "nearest": nn,
+            "nearest_family": [model_to_family[m] for m in nn],
+            "similarity": [sim.loc[m, n] for m, n in nn.items()],
+        },
+        index=s.index,
+    )
+    out["same_family"] = out["family"] == out["nearest_family"]
+    return out.sort_values(["family", "similarity"], ascending=[True, False])
+
+
+def plot_similarity_heatmap(
+    sim: pd.DataFrame,
+    model_to_family: dict,
+    *,
+    palette: dict | None = None,
+    cluster: bool = True,
+    method: str = "average",
+    fmt: str = ".2f",
+    cmap: str = "viridis",
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    figsize: tuple[float, float] = (11, 10),
+    show: bool = True,
+):
+    """Model x model similarity heatmap with a family colour strip.
+
+    ``cluster=True`` reorders models by hierarchical clustering on
+    ``1 - similarity`` (``method`` linkage) and draws the dendrogram;
+    ``cluster=False`` keeps family order. The diagonal (always 1) is masked so
+    the colour scale covers the off-diagonal range. Returns the heatmap Axes.
+    """
+    from scipy.cluster.hierarchy import linkage
+    from scipy.spatial.distance import squareform
+
+    palette = palette or make_palette(model_to_family.values())
+    fam = pd.Series(model_to_family).loc[sim.index]
+    row_colours = fam.map(palette).rename("family")
+    mask = np.eye(len(sim), dtype=bool)
+    off = sim.to_numpy()[~mask]
+
+    if cluster:
+        dist = 1 - sim.to_numpy()
+        np.fill_diagonal(dist, 0)
+        Z = linkage(squareform(dist, checks=False), method=method)
+        g = sns.clustermap(
+            sim,
+            row_linkage=Z,
+            col_linkage=Z,
+            row_colors=row_colours,
+            xticklabels=True,
+            yticklabels=True,
+            col_colors=row_colours,
+            mask=mask,
+            cmap=cmap,
+            vmin=off.min(),
+            vmax=off.max(),
+            annot=True,
+            fmt=fmt,
+            annot_kws={"fontsize": 7},
+            linewidths=0.5,
+            linecolor="white",
+            figsize=figsize,
+            dendrogram_ratio=0.12,
+            cbar_kws={"label": "mean cosine similarity"},
+            cbar_pos=(1.04, 0.3, 0.02, 0.4),  # right of the row labels
+        )
+        ax, fig = g.ax_heatmap, g.figure
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        if title:
+            g.figure.suptitle(title, y=1.02)
+    else:
+        order = fam.sort_values(kind="stable").index
+        s = sim.loc[order, order]
+        fig, ax = plt.subplots(figsize=figsize)
+        sns.heatmap(
+            s,
+            mask=np.eye(len(s), dtype=bool),
+            cmap=cmap,
+            vmin=off.min(),
+            vmax=off.max(),
+            annot=True,
+            fmt=fmt,
+            annot_kws={"fontsize": 7},
+            linewidths=0.5,
+            linecolor="white",
+            square=True,
+            cbar_kws={"label": "mean cosine similarity", "shrink": 0.7},
+            ax=ax,
+        )
+        # Outline the family blocks
+        sizes = fam.loc[order].value_counts(sort=False).reindex(fam.loc[order].unique())
+        start = 0
+        for n in sizes:
+            ax.add_patch(plt.Rectangle((start, start), n, n, fill=False, ec="red", lw=1.5))
+            start += n
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        if title:
+            ax.set_title(title)
+        fig.tight_layout()
+
+    for lab in ax.get_yticklabels() + ax.get_xticklabels():
+        lab.set_color(palette.get(model_to_family.get(lab.get_text()), "black"))
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return ax
