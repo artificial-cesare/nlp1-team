@@ -266,9 +266,15 @@ def friedman_test(
 
 
 def _friedman_from_wide(wide: pd.DataFrame) -> dict:
-    """Friedman test on a complete blocks x treatments table, plus Kendall's W."""
-    stat, p = friedmanchisquare(*[wide[c] for c in wide.columns])
+    """Friedman test on a complete blocks x treatments table, plus Kendall's W.
+
+    Returns NaNs when no block has any variation (e.g. a mark nobody uses).
+    """
     n, k = wide.shape
+    if n == 0 or wide.nunique(axis=1).max() <= 1:
+        nan = float("nan")
+        return {"chi2": nan, "df": k - 1, "p": nan, "W": nan, "n": n, "k": k}
+    stat, p = friedmanchisquare(*[wide[c] for c in wide.columns])
     return {
         "chi2": float(stat),
         "df": k - 1,
@@ -341,8 +347,20 @@ def family_permutation_test(
         sizes = np.bincount(labels)
         means = np.bincount(labels, weights=x) / sizes
         ss_between = float((sizes * (means - grand) ** 2).sum())
-        return ss_between / float(((x - grand) ** 2).sum())
+        return ss_between / ss_total
 
+    ss_total = float(((x - x.mean()) ** 2).sum())
+    if ss_total == 0 or np.isnan(ss_total):
+        nan = float("nan")
+        return {
+            "feature": col,
+            "eta2": nan,
+            "eta2_chance": nan,
+            "p": nan,
+            "n_models": len(x),
+            "n_families": int(codes.max() + 1),
+            "n_perm": 0,
+        }
     observed = eta2(codes)
     rng = np.random.default_rng(seed)
     null = np.array([eta2(rng.permutation(codes)) for _ in range(n_perm)])
@@ -521,3 +539,195 @@ def analyse_feature(
     res = friedman_test(df, col, model_col=model_col, prompt_col=prompt_col)
     print(format_friedman(res))
     return res
+
+
+# --------------------------------------------------------------------------- #
+# Punctuation
+# --------------------------------------------------------------------------- #
+# name -> regex. Counted per 100 words by add_punctuation_features().
+PUNCT_MARKS: dict[str, str] = {
+    "comma": r",",
+    "period": r"(?<!\.)\.(?!\.)",  # single dots only; "..." counted separately
+    "semicolon": r";",
+    "colon": r":",
+    "em_dash": "—",  # —
+    "en_dash": "–",  # –
+    "hyphen": r"(?<=\w)-(?=\w)",  # word-internal: well-known, long-term
+    "spaced_hyphen": r"(?<=\s)-(?=\s)",  # " - " used as a dash
+    "paren": r"\(",
+    "question": r"\?",
+    "exclaim": r"!",
+    "ellipsis_char": "…",  # …
+    "ellipsis_dots": r"\.\.\.",
+}
+
+# name -> regex. Used for "does this response use X at all" shares.
+QUOTE_MARKS: dict[str, str] = {
+    "curly_apos": "’",  # ’ (also closing single quote)
+    "straight_apos": r"'",
+    "curly_dquote": "[“”]",  # “ ”
+    "straight_dquote": r'"',
+}
+
+
+def add_punctuation_features(
+    df: pd.DataFrame,
+    text_col: str = "text",
+    words_col: str = "n_words",
+    marks: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Add ``<mark>_per100`` (rate per 100 words) for each mark, raw counts of each quote character
+    (``n_<quote>``), and a categorical ``quote_style``.
+
+    ``quote_style`` is ``curly``, ``straight``, ``mixed`` or ``none`` based on
+    every apostrophe and double quote in the response. Run
+    :func:`add_length_features` first (``n_words`` is needed).
+    """
+    marks = marks or PUNCT_MARKS
+    out = df.copy()
+    text = out[text_col]
+    words = out[words_col].replace(0, np.nan)
+
+    for name, pat in marks.items():
+        out[f"{name}_per100"] = text.str.count(pat) / words * 100
+
+    for name, pat in QUOTE_MARKS.items():
+        out[f"n_{name}"] = text.str.count(pat)
+
+    curly = out["n_curly_apos"] + out["n_curly_dquote"]
+    straight = out["n_straight_apos"] + out["n_straight_dquote"]
+    out["quote_style"] = np.select(
+        [(curly > 0) & (straight > 0), curly > 0, straight > 0],
+        ["mixed", "curly", "straight"],
+        default="none",
+    )
+    out.loc[text.isna(), "quote_style"] = np.nan
+    return out
+
+
+def punct_cols(marks: dict[str, str] | None = None) -> list[str]:
+    """Column names produced by :func:`add_punctuation_features` for ``marks``."""
+    return [f"{name}_per100" for name in (marks or PUNCT_MARKS)]
+
+
+def usage_share(
+    df: pd.DataFrame,
+    count_cols: list[str],
+    by: str | list[str] = ("family", "model"),
+) -> pd.DataFrame:
+    """Share of responses per group with a count > 0 in each column."""
+    by = list(by) if not isinstance(by, str) else by
+    return (df[count_cols] > 0).groupby([df[b] for b in np.atleast_1d(by)]).mean()
+
+
+def quote_style_table(df: pd.DataFrame, by: str | list[str] = ("family", "model")) -> pd.DataFrame:
+    """Share of each group's responses per ``quote_style`` (rows sum to 1), plus the number of
+    responses with any quote character (``n_with_quotes``).
+
+    Shares are over responses that use at least one quote character, so
+    ``none`` is reported only as a count.
+    """
+    by = list(by) if not isinstance(by, str) else by
+    has_q = df[df["quote_style"].isin(["curly", "straight", "mixed"])]
+    shares = pd.crosstab(
+        [has_q[b] for b in np.atleast_1d(by)],
+        has_q["quote_style"],
+        normalize="index",
+    ).reindex(columns=["curly", "straight", "mixed"], fill_value=0.0)
+    shares["n_with_quotes"] = has_q.groupby(list(np.atleast_1d(by))).size()
+    return shares
+
+
+def quote_style_test(df: pd.DataFrame, model_col: str = "model") -> dict:
+    """Chi-square test of independence (model x quote style) plus Cramér's V.
+
+    Uses only responses containing a quote character. Responses to the same prompt are not
+    independent, so treat p as descriptive; V (0 = no association, 1 = style fully determined by
+    model) is the useful number.
+    """
+    from scipy.stats import chi2_contingency
+
+    has_q = df[df["quote_style"].isin(["curly", "straight", "mixed"])]
+    table = pd.crosstab(has_q[model_col], has_q["quote_style"])
+    table = table.loc[:, table.sum() > 0]
+    chi2, p, dof, _ = chi2_contingency(table)
+    n = table.to_numpy().sum()
+    v = np.sqrt(chi2 / (n * (min(table.shape) - 1))) if min(table.shape) > 1 else 0
+    return {
+        "chi2": float(chi2),
+        "df": int(dof),
+        "p": float(p),
+        "cramers_v": float(v),
+        "n_responses": int(n),
+    }
+
+
+def plot_model_heatmap(
+    table: pd.DataFrame,
+    *,
+    labels: dict[str, str] | None = None,
+    fmt: str = ".2f",
+    scale: str = "column",
+    cmap: str = "Blues",
+    title: str | None = None,
+    cbar_label: str | None = None,
+    save_path: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    show: bool = True,
+    ax=None,
+):
+    """Heatmap of a (model x feature) table, annotated with the raw values.
+
+    ``scale="column"`` colours each column by its own min-max, so rare and
+    common marks are equally readable (colour = relative, numbers = absolute).
+    ``scale="global"`` uses one colour scale for the whole table (use it for
+    shares that are already on 0-1). A (family, model) MultiIndex is shown as
+    "model (family)" and kept in family order.
+    """
+    t = table.copy()
+    if isinstance(t.index, pd.MultiIndex):
+        t.index = [f"{m} ({f})" for f, m in t.index]
+    if labels:
+        t = t.rename(columns=labels)
+
+    if scale == "column":
+        rng_ = (t.max() - t.min()).replace(0, np.nan)
+        colour = ((t - t.min()) / rng_).fillna(0)
+        vmin, vmax = 0, 1
+        cbar_label = cbar_label or "relative within column (0 = min, 1 = max)"
+    elif scale == "global":
+        colour, vmin, vmax = t, None, None
+    else:
+        raise ValueError("scale must be 'column' or 'global'")
+
+    if ax is None:
+        w = max(6, 0.9 * t.shape[1] + 4)
+        h = max(4, 0.38 * t.shape[0] + 1.5)
+        fig, ax = plt.subplots(figsize=figsize or (w, h))
+    else:
+        fig = ax.figure
+    sns.heatmap(
+        colour,
+        annot=t.to_numpy(),
+        fmt=fmt,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        linewidths=0.5,
+        linecolor="white",
+        cbar_kws={"label": cbar_label} if cbar_label else None,
+        annot_kws={"fontsize": 8},
+        ax=ax,
+    )
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=40, ha="right")
+    ax.set_ylabel("")
+    if title:
+        ax.set_title(title)
+    fig.tight_layout()
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
+    if show:
+        plt.show()
+    return ax
