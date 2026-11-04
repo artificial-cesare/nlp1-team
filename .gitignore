@@ -1,6 +1,7 @@
 # Data (Kaggle competition files, not tracked)
 data/
 *.zip
+graphs/
 
 # Python
 __pycache__/
@@ -14,3 +15,8 @@ outputs/
 
 # Embedding cache (neural track)
 cache/
+
+# Kazik's Claude setup files
+CLAUDE.md
+EDA_CONTEXT.md
+KAZIK_REPORT.md
