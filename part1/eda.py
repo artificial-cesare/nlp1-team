@@ -385,13 +385,19 @@ def feature_tests(
     n_perm: int = 10_000,
     seed: int = 0,
     alpha: float = 0.05,
+    adjust: str | None = None,
 ) -> pd.DataFrame:
     """Run all three tests for each feature and return one row per feature.
 
     Columns are grouped under ``model`` (Friedman across models), ``family``
     (Friedman across families) and ``family_perm`` (permutation test), and
     sorted by the model-level Kendall's W. The ``*_sig`` columns use ``alpha``.
+
+    ``adjust="holm"`` adds a ``p_holm`` column to each test group (Holm
+    correction across the features in this call) and bases ``sig`` on it.
     """
+    if adjust not in {None, "holm"}:
+        raise ValueError("adjust must be None or 'holm'")
     cols = [cols] if isinstance(cols, str) else list(cols)
     kw = dict(model_col=model_col, prompt_col=prompt_col)
     rows = {}
@@ -422,7 +428,39 @@ def feature_tests(
     out = pd.DataFrame.from_dict(rows, orient="index")
     out.columns = pd.MultiIndex.from_tuples(out.columns)
     out.index.name = "feature"
+    if adjust == "holm":
+        for group in ("model", "family", "family_perm"):
+            out[(group, "p_holm")] = holm(out[(group, "p")].to_numpy(dtype=float))
+            out[(group, "sig")] = out[(group, "p_holm")] < alpha
+        order = []
+        for c in out.columns:
+            if c[1] != "p_holm":
+                order.append(c)
+            if c[1] == "p" and (c[0], "p_holm") in out.columns:
+                order.append((c[0], "p_holm"))
+        out = out[order]
     return out.sort_values(("model", "W"), ascending=False)
+
+
+def holm(p: np.ndarray) -> np.ndarray:
+    """Holm-Bonferroni adjusted p-values (NaNs are ignored and stay NaN).
+
+    Controls the family-wise error rate across all tests in ``p`` without
+    assuming they are independent; uniformly more powerful than Bonferroni.
+    """
+    p = np.asarray(p, dtype=float)
+    out = np.full_like(p, np.nan)
+    ok = ~np.isnan(p)
+    m = int(ok.sum())
+    if m == 0:
+        return out
+    pv = p[ok]
+    order = np.argsort(pv)
+    adj = np.maximum.accumulate((m - np.arange(m)) * pv[order])
+    res = np.empty(m)
+    res[order] = np.minimum(adj, 1.0)
+    out[ok] = res
+    return out
 
 
 def style_feature_tests(table: pd.DataFrame):
@@ -430,7 +468,7 @@ def style_feature_tests(table: pd.DataFrame):
     fmt = {}
     for c in table.columns:
         name = c[1]
-        if name == "p":
+        if name in {"p", "p_holm"}:
             fmt[c] = "{:.2g}"
         elif name in {"chi2"}:
             fmt[c] = "{:.1f}"
@@ -730,4 +768,760 @@ def plot_model_heatmap(
         fig.savefig(save_path, dpi=200, bbox_inches="tight")
     if show:
         plt.show()
+    return ax
+
+
+# --------------------------------------------------------------------------- #
+# Vocabulary rates
+# --------------------------------------------------------------------------- #
+# name -> regex, counted per 100 words by add_vocab_features(). Matched on lowercased text with
+# curly apostrophes (’) made straight, except digits (raw text).
+VOCAB_RATE_PATTERNS: dict[str, str] = {
+    "contractions": r"\b\w+'(?:s|t|re|ve|ll|d|m)\b",
+    "hedges": r"\b(?:may|might|can|could|perhaps|sometimes|seems?)\b",
+    "of_an": r"\b(?:of|an)\b",
+    "second_person": r"\b(?:you|your|yours|we|our|us)\b",
+    "digits": r"\d+",
+    "number_words": r"\b(?:hundred|thousand|million|billion)\b",
+}
+
+
+def add_vocab_features(
+    df: pd.DataFrame,
+    text_col: str = "text",
+    words_col: str = "n_words",
+    patterns: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Add ``<name>_per100`` (matches per 100 words) for each vocabulary pattern.
+
+    Run :func:`add_length_features` first (``n_words`` is needed).
+    """
+    patterns = patterns or VOCAB_RATE_PATTERNS
+    out = df.copy()
+    raw = out[text_col]
+    low = raw.str.lower().str.replace("’", "'", regex=False)
+    words = out[words_col].replace(0, np.nan)
+    for name, pat in patterns.items():
+        text = raw if name == "digits" else low
+        out[f"{name}_per100"] = text.str.count(pat) / words * 100
+    return out
+
+
+def vocab_cols(patterns: dict[str, str] | None = None) -> list[str]:
+    """Column names produced by :func:`add_vocab_features` for ``patterns``."""
+    return [f"{name}_per100" for name in (patterns or VOCAB_RATE_PATTERNS)]
+
+
+# --------------------------------------------------------------------------- #
+# Distinctive vocabulary: log-odds ratio with informative Dirichlet prior
+# (Monroe, Colaresi & Quinn, 2008, "Fightin' Words")
+# --------------------------------------------------------------------------- #
+VOCAB_TOKEN_PATTERN = r"(?u)\b[a-z]+(?:'[a-z]+)?\b"
+
+
+def _normalise_for_vocab(s: str) -> str:
+    """Lowercase and map curly quotes to straight ones, so "it’s" and "it's" are the same word here
+    (quote style is analysed separately)."""
+    return s.lower().replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+
+
+def _log_odds_z(counts: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Z-scores of each group (row) vs.
+
+    all other rows, per term (column).
+    """
+    a0 = alpha.sum()
+    total = counts.sum(axis=0)
+    n = counts.sum(axis=1, keepdims=True)
+    y_i, y_j = counts, total - counts
+    n_i, n_j = n, n.sum() - n
+    l_i = np.log((y_i + alpha) / (n_i + a0 - y_i - alpha))
+    l_j = np.log((y_j + alpha) / (n_j + a0 - y_j - alpha))
+    var = 1.0 / (y_i + alpha) + 1.0 / (y_j + alpha)
+    return (l_i - l_j) / np.sqrt(var)
+
+
+def _distinctive_block(
+    texts: pd.Series,
+    groups: pd.Series,
+    *,
+    vec_kwargs: dict,
+    k: int,
+    prior_scale: float,
+    min_count: int,
+    min_docs: int,
+) -> pd.DataFrame:
+    from scipy import sparse
+    from sklearn.feature_extraction.text import CountVectorizer
+
+    vec = CountVectorizer(**vec_kwargs)
+    X = vec.fit_transform(texts)
+    vocab = vec.get_feature_names_out()
+
+    levels = sorted(groups.unique())
+    codes = pd.Categorical(groups, categories=levels).codes
+    ind = sparse.csr_matrix(
+        (np.ones(len(codes)), (codes, np.arange(len(codes)))),
+        shape=(len(levels), len(codes)),
+    )
+    counts = np.asarray((ind @ X).todense(), dtype=float)
+    docs = np.asarray((ind @ (X > 0).astype(float)).todense())
+    n_resp = np.bincount(codes, minlength=len(levels))
+
+    keep = counts.sum(axis=0) >= min_count
+    counts, docs, vocab = counts[:, keep], docs[:, keep], vocab[keep]
+    if counts.shape[1] == 0:
+        return pd.DataFrame()
+
+    alpha = prior_scale * counts.sum(axis=0)
+    z = _log_odds_z(counts, alpha)
+
+    n_tok = counts.sum(axis=1)
+    rest_counts = counts.sum(axis=0) - counts
+    rest_tok = n_tok.sum() - n_tok
+
+    rows = []
+    for g, level in enumerate(levels):
+        ok = np.where((docs[g] >= min_docs) & (z[g] > 0))[0]
+        top = ok[np.argsort(-z[g, ok])][:k]
+        for rank, t in enumerate(top, start=1):
+            rows.append(
+                {
+                    "group": level,
+                    "rank": rank,
+                    "term": vocab[t],
+                    "z": z[g, t],
+                    "count": int(counts[g, t]),
+                    "per10k": counts[g, t] / n_tok[g] * 1e4,
+                    "per10k_rest": rest_counts[g, t] / rest_tok[g] * 1e4,
+                    "n_responses": int(docs[g, t]),
+                    "share_responses": docs[g, t] / n_resp[g],
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def distinctive_terms(
+    df: pd.DataFrame,
+    group_col: str = "model",
+    text_col: str = "text",
+    *,
+    within: str | None = None,
+    k: int = 10,
+    ngram_range: tuple[int, int] = (1, 1),
+    stop_words: str | list[str] | None = None,
+    prior_scale: float = 0.1,
+    min_count: int = 10,
+    min_docs: int = 5,
+) -> pd.DataFrame:
+    """Most over-used terms per group, ranked by log-odds z-score.
+
+    Each group (e.g. a model) is compared against all other rows; with
+    ``within="family"`` each model is compared only against the other models
+    of its own family (single-model families are skipped). This is the
+    comparison that matters once punctuation has identified the family.
+
+    The prior is ``prior_scale`` x the corpus counts of each term (an
+    informative Dirichlet prior), which shrinks rare terms towards zero.
+    |z| > 1.96 is roughly significant, but with thousands of terms treat z as a
+    ranking, not a test.
+
+    Filters: a term must occur ``min_count`` times overall and in at least
+    ``min_docs`` of the group's responses, so a word from a single prompt
+    can't top the list. Because every model answers the same prompts, topic
+    words largely cancel out and what is left is style.
+
+    Columns: ``group, rank, term, z, count, per10k`` (rate per 10,000 tokens in
+    the group), ``per10k_rest`` (in the comparison set), ``n_responses`` and
+    ``share_responses`` (responses of the group that contain the term), plus
+    ``family`` when ``within`` is used.
+    """
+    vec_kwargs = dict(
+        token_pattern=VOCAB_TOKEN_PATTERN,
+        lowercase=False,  # done in _normalise_for_vocab
+        ngram_range=ngram_range,
+        stop_words=stop_words,
+    )
+    params = dict(
+        vec_kwargs=vec_kwargs,
+        k=k,
+        prior_scale=prior_scale,
+        min_count=min_count,
+        min_docs=min_docs,
+    )
+    d = df.dropna(subset=[text_col, group_col])
+    texts = d[text_col].map(_normalise_for_vocab)
+
+    if within is None:
+        return _distinctive_block(texts, d[group_col], **params)
+
+    parts = []
+    for fam, idx in d.groupby(within).groups.items():
+        sub = d.loc[idx]
+        if sub[group_col].nunique() < 2:
+            continue
+        block = _distinctive_block(texts.loc[idx], sub[group_col], **params)
+        if not block.empty:
+            parts.append(block.assign(family=fam))
+    if not parts:
+        return pd.DataFrame()
+    out = pd.concat(parts, ignore_index=True)
+    return out[["family"] + [c for c in out.columns if c != "family"]]
+
+
+def top_terms_summary(table: pd.DataFrame, k: int | None = None) -> pd.DataFrame:
+    """One row per group with its top terms as a comma-separated string."""
+    t = table if k is None else table[table["rank"] <= k]
+    keys = ["family", "group"] if "family" in t.columns else ["group"]
+    return (
+        t.sort_values(keys + ["rank"])
+        .groupby(keys, sort=True)["term"]
+        .agg(", ".join)
+        .rename("top terms")
+        .to_frame()
+    )
+
+
+def plot_distinctive_terms(
+    table: pd.DataFrame,
+    groups: list[str] | None = None,
+    *,
+    k: int = 10,
+    col_wrap: int = 3,
+    palette: dict | None = None,
+    group_to_colour: dict | None = None,
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    show: bool = True,
+):
+    """Small multiples: horizontal bars of the top-``k`` z-scores per group.
+
+    ``group_to_colour`` maps each group to a colour key in ``palette`` (e.g.
+    ``model -> family`` with a family palette), so bars share family colours.
+    """
+    groups = groups or sorted(table["group"].unique())
+    n = len(groups)
+    ncols = min(col_wrap, n)
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(4.2 * ncols, 0.32 * k * nrows + 1.2 * nrows),
+        squeeze=False,
+    )
+    for ax, g in zip(axes.flat, groups):
+        sub = table[(table["group"] == g) & (table["rank"] <= k)].sort_values("z")
+        colour = "#4C72B0"
+        if palette and group_to_colour:
+            colour = palette.get(group_to_colour.get(g), colour)
+        ax.barh(sub["term"], sub["z"], color=colour)
+        ax.set_title(g, fontsize=10)
+        ax.tick_params(axis="y", labelsize=9)
+        ax.set_xlabel("log-odds z", fontsize=9)
+    for ax in list(axes.flat)[n:]:
+        ax.set_visible(False)
+    if title:
+        fig.suptitle(title)
+    _finish(fig, save_path, show)
+    return axes  # not fig: Jupyter would display a returned Figure a second time
+
+
+# --------------------------------------------------------------------------- #
+# Model similarity: TF-IDF cosine between responses to the same prompt
+# --------------------------------------------------------------------------- #
+WORD_TFIDF_KWARGS: dict = dict(
+    token_pattern=VOCAB_TOKEN_PATTERN,
+    lowercase=False,  # done in _normalise_for_vocab
+    sublinear_tf=True,
+    min_df=2,
+)
+CHAR_TFIDF_KWARGS: dict = dict(
+    analyzer="char",
+    ngram_range=(2, 4),
+    lowercase=False,  # keep case, punctuation and quote style
+    sublinear_tf=True,
+    min_df=2,
+)
+
+
+def within_prompt_similarity(
+    df: pd.DataFrame,
+    *,
+    text_col: str = "text",
+    model_col: str = "model",
+    prompt_col: str = "prompt_id",
+    analyzer: str = "word",
+    idf: str = "global",
+    vec_kwargs: dict | None = None,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Mean TF-IDF cosine similarity between models, compared only within prompts.
+
+    With ``idf="global"`` one TF-IDF vectoriser (vocabulary + IDF) is fitted on
+    all responses in ``df``, so every prompt is embedded in the same space (as a
+    classifier would see it). With ``idf="prompt"`` a separate vectoriser is
+    fitted on each prompt's responses, so words that every model uses for that
+    prompt are down-weighted (robustness check). For each prompt answered by
+    every model, the cosine similarity between the models' responses gives a
+    k x k matrix; the result is the mean over those prompts. Prompts missing a
+    response are skipped, as in :func:`friedman_test`.
+
+    ``analyzer="word"`` uses lowercased word unigrams with curly apostrophes
+    merged (as in :func:`distinctive_terms`); ``analyzer="char"`` uses raw
+    character 2-4-grams, which keep punctuation, case and quote style.
+    ``vec_kwargs`` overrides the defaults.
+
+    Returns ``(mean_sim, per_prompt)``: a model x model DataFrame (diagonal = 1)
+    and the stacked per-prompt matrices, shape ``(n_prompts, k, k)``.
+    """
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    if analyzer == "word":
+        kwargs = {**WORD_TFIDF_KWARGS, **(vec_kwargs or {})}
+        texts = df[text_col].map(_normalise_for_vocab)
+    elif analyzer == "char":
+        kwargs = {**CHAR_TFIDF_KWARGS, **(vec_kwargs or {})}
+        texts = df[text_col]
+    else:
+        raise ValueError("analyzer must be 'word' or 'char'")
+    if idf not in {"global", "prompt"}:
+        raise ValueError("idf must be 'global' or 'prompt'")
+
+    X = TfidfVectorizer(**kwargs).fit_transform(texts) if idf == "global" else None
+    models = sorted(df[model_col].unique())
+    pos = np.arange(len(df))
+
+    mats = []
+    for _, idx in df.groupby(prompt_col).indices.items():
+        sub = df.iloc[idx]
+        if sub[model_col].nunique() < len(models) or len(sub) != len(models):
+            continue
+        order = pos[idx][np.argsort(sub[model_col].to_numpy())]  # rows in model order
+        if idf == "global":
+            Xp = X[order]  # rows are L2-normalised
+        else:
+            Xp = TfidfVectorizer(**{**kwargs, "min_df": 1}).fit_transform(texts.iloc[order])
+        mats.append(cosine_similarity(Xp))
+    per_prompt = np.stack(mats)
+    mean_sim = pd.DataFrame(per_prompt.mean(axis=0), index=models, columns=models)
+    mean_sim.index.name = mean_sim.columns.name = model_col
+    return mean_sim, per_prompt
+
+
+def double_centre(sim: pd.DataFrame) -> pd.DataFrame:
+    """Remove each model's overall similarity level from a similarity matrix.
+
+    Some models are similar to everyone ("hubs"), others to no one. Double
+    centring (``s_ij - mean_i - mean_j + grand mean``, off-diagonal means)
+    keeps only pair-specific affinity: 0 = as similar as the two models'
+    general levels predict. The diagonal is set to 1 for plotting.
+    """
+    s = sim.to_numpy(dtype=float, copy=True)
+    np.fill_diagonal(s, np.nan)
+    row = np.nanmean(s, axis=1)
+    c = s - row[:, None] - row[None, :] + np.nanmean(s)
+    np.fill_diagonal(c, 1.0)
+    return pd.DataFrame(c, index=sim.index, columns=sim.columns)
+
+
+def family_similarity_table(sim: pd.DataFrame, model_to_family: dict) -> pd.DataFrame:
+    """Family x family mean of the model similarities (diagonal excludes self-pairs).
+
+    Single-model families have no within-family pair, so their diagonal is NaN.
+    """
+    fams = pd.Series(model_to_family).loc[sim.index].to_numpy()
+    s = sim.to_numpy().copy()
+    np.fill_diagonal(s, np.nan)
+    levels = sorted(set(fams))
+    out = pd.DataFrame(index=levels, columns=levels, dtype=float)
+    for a in levels:
+        for b in levels:
+            block = s[np.ix_(fams == a, fams == b)]
+            out.loc[a, b] = np.nanmean(block) if np.isfinite(block).any() else np.nan
+    return out
+
+
+def family_similarity_permutation_test(
+    sim: pd.DataFrame,
+    model_to_family: dict,
+    *,
+    n_perm: int = 10_000,
+    seed: int = 0,
+) -> tuple[dict, pd.DataFrame]:
+    """Are models in the same family more similar than models in different families?
+
+    Statistic: mean similarity over same-family model pairs minus mean over
+    different-family pairs (upper triangle of ``sim``, self-pairs excluded). The
+    null distribution comes from shuffling family labels across models (family
+    sizes fixed), which permutes whole rows and columns of the matrix together
+    (a Mantel-style test), so the dependence between pairs that share a model is
+    kept.
+
+    Returns ``(overall, per_family)``. ``overall`` holds the within / between
+    means, their difference, the null mean and the one-sided p-value.
+    ``per_family`` has, for each family with 2+ models, its mean within-family
+    similarity and the permutation p-value for that family's label (how often
+    a random set of the same size is at least as similar).
+    """
+    models = list(sim.index)
+    fams = pd.Series(model_to_family).loc[models]
+    codes, levels = pd.factorize(fams)
+    s = sim.to_numpy()
+    iu = np.triu_indices(len(models), k=1)
+    pair_sim = s[iu]
+
+    def stats(labels: np.ndarray) -> tuple[float, np.ndarray]:
+        same = labels[iu[0]] == labels[iu[1]]
+        diff = pair_sim[same].mean() - pair_sim[~same].mean()
+        per_fam = np.array(
+            [
+                pair_sim[same & (labels[iu[0]] == f)].mean() if sizes[f] > 1 else np.nan
+                for f in range(len(levels))
+            ]
+        )
+        return diff, per_fam
+
+    sizes = np.bincount(codes)
+    same_obs = codes[iu[0]] == codes[iu[1]]
+    obs_diff, obs_fam = stats(codes)
+
+    rng = np.random.default_rng(seed)
+    null_diff = np.empty(n_perm)
+    null_fam = np.empty((n_perm, len(levels)))
+    for i in range(n_perm):
+        null_diff[i], null_fam[i] = stats(rng.permutation(codes))
+
+    overall = {
+        "within_mean": float(pair_sim[same_obs].mean()),
+        "between_mean": float(pair_sim[~same_obs].mean()),
+        "diff": float(obs_diff),
+        "diff_chance": float(null_diff.mean()),
+        "diff_null_sd": float(null_diff.std()),
+        "p": float((np.sum(null_diff >= obs_diff) + 1) / (n_perm + 1)),
+        "n_within_pairs": int(same_obs.sum()),
+        "n_between_pairs": int((~same_obs).sum()),
+        "n_perm": n_perm,
+    }
+    rows = []
+    for f, fam in enumerate(levels):
+        if sizes[f] < 2:
+            continue
+        rows.append(
+            {
+                "family": fam,
+                "n_models": int(sizes[f]),
+                "within_mean": obs_fam[f],
+                "chance_mean": float(np.nanmean(null_fam[:, f])),
+                "p": float((np.sum(null_fam[:, f] >= obs_fam[f]) + 1) / (n_perm + 1)),
+            }
+        )
+    return overall, pd.DataFrame(rows).set_index("family")
+
+
+def nearest_neighbours(sim: pd.DataFrame, model_to_family: dict) -> pd.DataFrame:
+    """Most similar other model for each model, and whether it is in the same family."""
+    a = sim.to_numpy(copy=True)
+    np.fill_diagonal(a, -np.inf)
+    s = pd.DataFrame(a, index=sim.index, columns=sim.columns)
+    nn = s.idxmax(axis=1)
+    out = pd.DataFrame(
+        {
+            "family": [model_to_family[m] for m in s.index],
+            "nearest": nn,
+            "nearest_family": [model_to_family[m] for m in nn],
+            "similarity": [sim.loc[m, n] for m, n in nn.items()],
+        },
+        index=s.index,
+    )
+    out["same_family"] = out["family"] == out["nearest_family"]
+    return out.sort_values(["family", "similarity"], ascending=[True, False])
+
+
+def plot_similarity_heatmap(
+    sim: pd.DataFrame,
+    model_to_family: dict,
+    *,
+    palette: dict | None = None,
+    cluster: bool = True,
+    method: str = "average",
+    fmt: str = ".2f",
+    cmap: str = "viridis",
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    figsize: tuple[float, float] = (11, 10),
+    show: bool = True,
+):
+    """Model x model similarity heatmap with a family colour strip.
+
+    ``cluster=True`` reorders models by hierarchical clustering on
+    ``1 - similarity`` (``method`` linkage) and draws the dendrogram;
+    ``cluster=False`` keeps family order. The diagonal (always 1) is masked so
+    the colour scale covers the off-diagonal range. Returns the heatmap Axes.
+    """
+    from scipy.cluster.hierarchy import linkage
+    from scipy.spatial.distance import squareform
+
+    palette = palette or make_palette(model_to_family.values())
+    fam = pd.Series(model_to_family).loc[sim.index]
+    row_colours = fam.map(palette).rename("family")
+    mask = np.eye(len(sim), dtype=bool)
+    off = sim.to_numpy()[~mask]
+
+    if cluster:
+        dist = 1 - sim.to_numpy()
+        np.fill_diagonal(dist, 0)
+        Z = linkage(squareform(dist, checks=False), method=method)
+        g = sns.clustermap(
+            sim,
+            row_linkage=Z,
+            col_linkage=Z,
+            row_colors=row_colours,
+            xticklabels=True,
+            yticklabels=True,
+            col_colors=row_colours,
+            mask=mask,
+            cmap=cmap,
+            vmin=off.min(),
+            vmax=off.max(),
+            annot=True,
+            fmt=fmt,
+            annot_kws={"fontsize": 7},
+            linewidths=0.5,
+            linecolor="white",
+            figsize=figsize,
+            dendrogram_ratio=0.12,
+            cbar_kws={"label": "mean cosine similarity"},
+            cbar_pos=(1.04, 0.3, 0.02, 0.4),  # right of the row labels
+        )
+        ax, fig = g.ax_heatmap, g.figure
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        if title:
+            g.figure.suptitle(title, y=1.02)
+    else:
+        order = fam.sort_values(kind="stable").index
+        s = sim.loc[order, order]
+        fig, ax = plt.subplots(figsize=figsize)
+        sns.heatmap(
+            s,
+            mask=np.eye(len(s), dtype=bool),
+            cmap=cmap,
+            vmin=off.min(),
+            vmax=off.max(),
+            annot=True,
+            fmt=fmt,
+            annot_kws={"fontsize": 7},
+            linewidths=0.5,
+            linecolor="white",
+            square=True,
+            cbar_kws={"label": "mean cosine similarity", "shrink": 0.7},
+            ax=ax,
+        )
+        # Outline the family blocks
+        sizes = fam.loc[order].value_counts(sort=False).reindex(fam.loc[order].unique())
+        start = 0
+        for n in sizes:
+            ax.add_patch(plt.Rectangle((start, start), n, n, fill=False, ec="red", lw=1.5))
+            start += n
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        if title:
+            ax.set_title(title)
+        fig.tight_layout()
+
+    for lab in ax.get_yticklabels() + ax.get_xticklabels():
+        lab.set_color(palette.get(model_to_family.get(lab.get_text()), "black"))
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return ax
+
+
+# --------------------------------------------------------------------------- #
+# Feature correlations
+# --------------------------------------------------------------------------- #
+def feature_correlations(
+    df: pd.DataFrame,
+    cols: list[str],
+    *,
+    level: str = "response",
+    model_col: str = "model",
+    prompt_col: str = "prompt_id",
+) -> pd.DataFrame:
+    """Correlation between features after removing prompt effects.
+
+    Every feature is first replaced by its within-prompt rank
+    (:func:`within_prompt_rank`), using only prompts answered by every model.
+
+    - ``level="response"``: Pearson correlation of those ranks over all
+      responses. Each prompt's ranks have the same mean and spread, so this is
+      (up to ties) the average of the per-prompt Spearman correlations:
+      "when a response is high on A, is it also high on B, compared with the
+      other answers to the same prompt?". Prompt length or topic cannot create
+      correlation.
+    - ``level="model"``: correlation of the models' mean ranks (one point per
+      model): "do A and B rank the models the same way?", i.e. do they carry
+      the same model signature. With 18 points, treat it as descriptive.
+    """
+    if level not in {"response", "model"}:
+        raise ValueError("level must be 'response' or 'model'")
+    complete = df.groupby(prompt_col)[model_col].transform("nunique") == df[model_col].nunique()
+    d = df[complete]
+    ranks = pd.DataFrame({c: within_prompt_rank(d, c, prompt_col) for c in cols})
+    if level == "model":
+        ranks = ranks.groupby(d[model_col]).mean()
+    return ranks.corr()
+
+
+def correlated_pairs(corr: pd.DataFrame, threshold: float = 0.7) -> pd.DataFrame:
+    """Feature pairs with ``|r| >= threshold``, strongest first."""
+    iu = np.triu_indices(len(corr), k=1)
+    r = corr.to_numpy()[iu]
+    out = pd.DataFrame({"feature_a": corr.index[iu[0]], "feature_b": corr.columns[iu[1]], "r": r})
+    out = out[out["r"].abs() >= threshold]
+    return out.reindex(out["r"].abs().sort_values(ascending=False).index).reset_index(drop=True)
+
+
+def plot_feature_correlations(
+    corr: pd.DataFrame,
+    *,
+    labels: dict[str, str] | None = None,
+    method: str = "average",
+    fmt: str = ".2f",
+    cmap: str = "vlag",
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    figsize: tuple[float, float] = (11, 10),
+    show: bool = True,
+):
+    """Clustered correlation heatmap (diverging, -1 to 1, annotated).
+
+    Features are ordered by hierarchical clustering on ``1 - |r|``, so strongly
+    correlated features end up next to each other whatever the sign. Returns
+    the heatmap Axes.
+    """
+    from scipy.cluster.hierarchy import linkage
+    from scipy.spatial.distance import squareform
+
+    c = corr.rename(index=labels or {}, columns=labels or {})
+    dist = 1 - c.abs().fillna(0).to_numpy()
+    np.fill_diagonal(dist, 0)
+    Z = linkage(squareform(dist, checks=False), method=method)
+    g = sns.clustermap(
+        c,
+        row_linkage=Z,
+        col_linkage=Z,
+        cmap=cmap,
+        center=0,
+        vmin=-1,
+        vmax=1,
+        annot=True,
+        fmt=fmt,
+        annot_kws={"fontsize": 7},
+        linewidths=0.5,
+        linecolor="white",
+        xticklabels=True,
+        yticklabels=True,
+        figsize=figsize,
+        dendrogram_ratio=0.1,
+        cbar_kws={"label": "correlation"},
+        cbar_pos=(1.04, 0.3, 0.02, 0.4),  # right of the row labels
+    )
+    ax, fig = g.ax_heatmap, g.figure
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    if title:
+        fig.suptitle(title, y=1.02)
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return ax
+
+
+def model_profile_pca(
+    df: pd.DataFrame,
+    cols: list[str],
+    *,
+    n_components: int = 3,
+    model_col: str = "model",
+    prompt_col: str = "prompt_id",
+) -> dict:
+    """PCA of the models' feature profiles (mean within-prompt rank per feature).
+
+    Each feature is standardised across models first, so all features count
+    equally. Shows how many independent directions the model signatures
+    really have. Returns ``explained`` (share of variance per component),
+    ``loadings`` (feature x component) and ``scores`` (model x component).
+    """
+    complete = df.groupby(prompt_col)[model_col].transform("nunique") == df[model_col].nunique()
+    d = df[complete]
+    prof = pd.DataFrame({c: within_prompt_rank(d, c, prompt_col) for c in cols})
+    prof = prof.groupby(d[model_col]).mean()
+    z = (prof - prof.mean()) / prof.std()
+    U, S, Vt = np.linalg.svd(z.to_numpy(), full_matrices=False)
+    names = [f"PC{i + 1}" for i in range(len(S))]
+    explained = pd.Series(S**2 / (S**2).sum(), index=names)
+    k = n_components
+    return {
+        "explained": explained,
+        "loadings": pd.DataFrame(Vt[:k].T, index=cols, columns=names[:k]),
+        "scores": pd.DataFrame(U[:, :k] * S[:k], index=prof.index, columns=names[:k]),
+    }
+
+
+def plot_model_profiles(
+    pca: dict,
+    model_to_family: dict,
+    *,
+    palette: dict | None = None,
+    x: str = "PC1",
+    y: str = "PC2",
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    figsize: tuple[float, float] = (8, 6.5),
+    show: bool = True,
+):
+    """Scatter of models on two principal components of :func:`model_profile_pca`."""
+    scores = pca["scores"]
+    fams = scores.index.map(model_to_family)
+    palette = palette or make_palette(fams)
+    fig, ax = plt.subplots(figsize=figsize)
+    sns.scatterplot(
+        x=scores[x],
+        y=scores[y],
+        hue=fams,
+        hue_order=list(palette),
+        palette=palette,
+        s=80,
+        ax=ax,
+    )
+    # Label below the point instead of above when another point is close (avoids overlaps)
+    xy = scores[[x, y]]
+    span = (xy.max() - xy.min()).replace(0, 1).to_numpy()
+    placed: list[np.ndarray] = []
+    for m, (px, py) in xy.sort_values(y, ascending=False).iterrows():
+        p = np.array([px, py]) / span
+        crowded = any(np.all(np.abs(p - q) < [0.15, 0.05]) for q in placed)
+        offset = (4, -11) if crowded else (4, 4)
+        ax.annotate(m, (px, py), xytext=offset, textcoords="offset points", fontsize=7)
+        placed.append(p)
+    ex = pca["explained"]
+    ax.set_xlabel(f"{x} ({ex[x]:.0%} of variance)")
+    ax.set_ylabel(f"{y} ({ex[y]:.0%} of variance)")
+    ax.axhline(0, color="grey", lw=0.5)
+    ax.axvline(0, color="grey", lw=0.5)
+    if title:
+        ax.set_title(title)
+    sns.move_legend(ax, "upper left", bbox_to_anchor=(1.01, 1), frameon=False, title="family")
+    _finish(fig, save_path, show)
     return ax

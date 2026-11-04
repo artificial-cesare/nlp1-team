@@ -12,3 +12,8 @@ __pycache__/
 # OS
 .DS_Store
 outputs/
+
+# Kazik's Claude setup files
+CLAUDE.md
+EDA_CONTEXT.md
+KAZIK_REPORT.md
