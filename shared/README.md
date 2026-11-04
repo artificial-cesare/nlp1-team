@@ -8,8 +8,9 @@ All three tracks (Kazik: EDA and tokenisers; Liam: token indicators and bag-of-w
 | `tokenization.py` | `preprocess()` (NFC only), `tokenize(texts, name)`, `tokenizer_stats()`, the `TOKENIZERS` registry |
 | `eval_harness.py` | `load_folds()`, `MODELS` (model specs and hyperparameter grids), `run_cv()` (nested CV, parallel over folds), `compare()` (Bayesian correlated t-test, ROPE = 1 pp), `final_test()`, `save_result()` / `load_results()` |
 | `analysis.py` | `results_table`, `comparison_table`, `plot_posteriors`, `plot_confusion` (family-ordered), `family_errors`, `per_class_f1`, `accuracy_by_length`, `misclassified` |
+| `text_models.py` | Neural-track models that read text directly: `run_cv_text(..., "transformer" or "finetune")` (tiny transformer from scratch; fine-tuned LUSR) and `final_test_text()`; same result format as `run_cv` |
 | `folds.json` | Stratified 5-fold CV grouped by `prompt_id`, 10 repeats (50 folds), by passage `id` |
-| `results/` | One JSON per system (`<representation>__<model>.json`) so we can compare across tracks |
+| `results/` | One JSON per system (`<representation>__<model>.json`): per-fold scores, chosen params, out-of-fold predictions. The neural track's results are already here (best: `lusr/logreg`, 35.8% balanced accuracy) |
 
 ## Protocol (details and justification: `part1/project.ipynb`, step 2)
 
