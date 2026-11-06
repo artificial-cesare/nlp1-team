@@ -1,0 +1,24 @@
+group,representation,logreg,logreg_folds,mlp,mlp_folds,resmlp,resmlp_folds
+Token indicators,"Our BPE, 2k vocabulary",23.35,50,24.22,5.0,22.88,5.0
+Token indicators,"Our BPE, 4k",22.79,50,24.17,5.0,21.77,5.0
+Token indicators,"Our BPE, 8k",20.65,50,18.38,5.0,19.31,5.0
+Token indicators,"LUSR's BPE, 50k",20.47,50,,,,
+Bag-of-words,"Our BPE, 2k vocabulary",23.88,50,25.37,5.0,24.45,5.0
+Bag-of-words,"Our BPE, 4k",21.69,50,22.14,5.0,21.49,5.0
+Bag-of-words,"Our BPE, 8k",20.21,50,18.71,5.0,19.77,5.0
+Bag-of-words,"LUSR's BPE, 50k",19.96,50,,,,
+Other features,Character 2–4-grams (20k),26.02,50,,,,
+Other features,Length only (baseline),12.34,50,,,,
+Frozen embeddings,"LUSR, style (768-d)",35.79,50,35.06,50.0,35.68,50.0
+Frozen embeddings,"Qwen3-0.6B-Base, layer 14 (1024-d)",34.2,50,34.21,50.0,34.6,50.0
+Frozen embeddings,"Qwen3-Base L14, mean‖max (2048-d)",31.91,50,,,,
+Frozen embeddings,"Qwen3-Embedding, semantic (1024-d)",16.09,50,,,,
+Learned end to end (linear softmax head),Transformer from scratch (RoBERTa ids),21.58,5,,,,
+Learned end to end (linear softmax head),"LUSR fine-tuned, all layers, 5 epochs",33.8,5,,,,
+Learned end to end (linear softmax head),"LUSR fine-tuned, all layers, 10 epochs",33.52,5,,,,
+Learned end to end (linear softmax head),"LUSR fine-tuned, top 2 layers",34.77,5,,,,
+Learned end to end (linear softmax head),"LUSR fine-tuned, top 4 layers",35.84,5,,,,
+Learned end to end (linear softmax head),"LUSR fine-tuned, top 4 layers + refit",37.5,5,,,,
+Prompt-centred embeddings,LUSR,44.05,50,,,,
+Prompt-centred embeddings,"Qwen3-Base, layer 14",48.73,50,,,,
+Prompt-centred embeddings,Qwen3-Embedding,25.46,50,,,,

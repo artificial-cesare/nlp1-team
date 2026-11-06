@@ -1,0 +1,10 @@
+Model,Tuned on the inner validation split,Settings,Fixed (not tuned),Most often chosen (folds)
+Logistic regression (multinomial),"C (inverse L2 strength) ∈ {1e-4, 1e-3, 1e-2, 0.1, 1, 10}",6,"StandardScaler, L-BFGS, max 3,000 iterations","LUSR embedding: C = 0.01 (28), 0.1 (12) of 50; BoW 2k: C = 0.001 (27), 10 (13) of 50"
+"Logistic regression, one-vs-rest",nothing,1,C = 0.01 (cheap check),–
+"Logistic regression, scaling tuned (extra)","C ∈ {1e-4 … 1e4} (9 values) × standardise {yes, no}",18,as above,no scaling in 50/50 folds (BoW 2k) and 47/50 (indicators 2k)
+"MLP, 1 hidden layer","width {256, 1024} × dropout {0.2, 0.5} × learning rate {1e-3, 3e-4} × weight decay {1e-4, 1e-2}; + number of epochs (early stopping)",16,"ReLU, input dropout = dropout/2, AdamW, batch 64, ≤ 200 epochs, patience 15, standardised input","LUSR: width 256, dropout 0.5, lr 0.001"
+Residual MLP,"blocks {2, 3} × width {256, 512} × dropout {0.3, 0.5} × learning rate {1e-3, 3e-4}; + number of epochs (early stopping)",16,"pre-LayerNorm blocks, GELU, weight decay 1e-2, AdamW, batch 64, patience 15","LUSR: 2 blocks, width 256, dropout 0.5, lr 0.0003"
+Transformer from scratch,"d_model {128, 256}; + number of epochs (early stopping)",2,"2 layers, 4 heads, FF 4·d, dropout 0.1, lr 5e-4, weight decay 0.01, batch 32, ≤ 60 epochs, patience 8; vocabulary = RoBERTa ids seen ≥ 2× in the training part","d_model = 256 in 5/5 folds; epochs 13, 15, 8, 12, 7"
+"LUSR fine-tuned, all layers",epoch: best of the 5 (or 10) end-of-epoch checkpoints,5 / 10,"lr 2e-5 (head 1e-3), weight decay 0.01, 10% linear warm-up then linear decay to 0, batch 16, mean pooling","epochs 5, 3, 5, 5, 5 (5-epoch run)"
+"LUSR fine-tuned, top 2 / top 4 layers","epoch: best of 6 checkpoints; with refit, retrain on the whole training fold for that many epochs",6,"as above but lr 5e-5, head dropout 0.1, lower layers and embeddings frozen","top 4: epochs 4, 6, 6, 6, 5"
+Prompt recovery for centring (Kaggle),"clustering distance threshold, by adjusted Rand index on the train split",159,"average linkage, cosine distance on Qwen3-Embedding vectors",threshold 0.385 (ARI 0.988 on the test split)
