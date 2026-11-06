@@ -150,7 +150,11 @@ class TorchClassifier:
         X = X.toarray() if sp.issparse(X) else np.asarray(X)
         X = X.astype(np.float32)
         if fit:
-            self.mu_, self.sd_ = X.mean(0), X.std(0) + 1e-6
+            sd = X.std(0)
+            self.mu_, self.sd_ = X.mean(0), sd + 1e-6
+            # A column that never varies in training (a token absent from the training fold) is left unscaled,
+            # as in sklearn's StandardScaler; otherwise one occurrence at test time becomes 1e6 and swamps the input.
+            self.sd_[sd == 0] = 1.0
         return torch.from_numpy((X - self.mu_) / self.sd_)
 
     def _build(self, d_in, n_classes):
