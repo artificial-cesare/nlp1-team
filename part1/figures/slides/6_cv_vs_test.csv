@@ -1,0 +1,8 @@
+system,cv,cv_folds,test,test_clusters,kaggle_like_mean,kaggle_like_lo,kaggle_like_hi
+LUSR + logistic regression,35.79,50,34.07,,33.97,30.96,38.23
+LUSR + MLP,35.06,50,35.37,,,,
+LUSR + residual MLP,35.68,50,35.93,,,,
+Qwen3-Base L14 + logistic regression,34.2,50,32.41,,32.14,29.01,34.73
+"LUSR fine-tuned, top 4 layers + refit",37.5,5,35.74,,,,
+Prompt-centred LUSR + LR,44.05,50,47.59,46.85,44.48,40.34,51.55
+Prompt-centred Qwen3-Base L14 + LR  ★,48.73,50,48.15,47.59,46.85,42.57,52.01

@@ -2,11 +2,11 @@
 
 A list of ideas for next week. Add new ideas at the bottom of the matching section.
 
-## Where we stand (neural track, 2026-11-04)
+## Where we stand (neural track, 2026-11-05)
 
-- **Best result so far: 44.1% CV balanced accuracy** on 18 classes (chance is 5.6%). It comes from LUSR embeddings with each prompt's mean subtracted, then logistic regression (see A1). Without the centring, LUSR + logistic regression reaches 35.8%.
+- **Best result so far: 48.7% CV balanced accuracy** on 18 classes (chance is 5.6%), and 47.6% on the held-out test split with prompts recovered by clustering, as Kaggle requires (46.9% on Kaggle-like subsamples with unequal classes). It comes from Qwen3-0.6B-Base layer-14 embeddings with each prompt's mean subtracted, then logistic regression (notebook step 7b). Centred LUSR reaches 44.1% CV (46.9% test with recovered clusters). Without the centring, LUSR + logistic regression reaches 35.8% and Qwen3-Base 34.2%.
 - MLP and ResMLP on the same embeddings score within 1 pp of logistic regression. The representation limits us, not the classifier.
-- Full fine-tuning of LUSR reaches 33.8% (5 epochs) and 33.5% (10 epochs). It overfits after epoch 3. Training only the top 4 of 12 layers reaches 35.8% (cell 6.5c), level with logistic regression.
+- Full fine-tuning of LUSR reaches 33.8% (5 epochs) and 33.5% (10 epochs). It overfits after epoch 3. Training only the top 4 of 12 layers reaches 35.8% (cell 6.5c), level with logistic regression. Refitting that model on the whole training fold for the chosen number of epochs raises it to 37.5% CV and 35.7% test (cell 6.5d): more data helps fine-tuning.
 - We have about 120 passages per class in the train split (about 96 in each inner training set).
 - Results are in `part1/neural_project.ipynb` and `shared/results/`.
 
@@ -47,9 +47,9 @@ A list of ideas for next week. Add new ideas at the bottom of the matching secti
 
 1. **Remove the topic: subtract each prompt's mean embedding.** Balanced accuracy goes from 35.8% to 44.1% (+8.3 pp, P(better) = 1.00). The result is saved as `shared/results/lusr-promptcentred__logreg.json`.
 2. **One-to-one assignment within a prompt.** Each prompt has exactly one answer per model, so assign the 18 answers to the 18 models with the Hungarian algorithm (`scipy.optimize.linear_sum_assignment` on the log-probabilities). With centring this reaches 48.2% (first CV repeat), and family accuracy goes from 69.5% to 76.5%. Fable's F1 goes from 0.16 to 0.26.
-3. **For Kaggle,** the test file has no prompt ids. TF-IDF clustering recovers the prompts: 99.1% of texts land in their prompt's cluster (ARI 0.91). Check that the hidden test set also contains complete groups of 18 answers per prompt.
+3. **For Kaggle,** the test file has no prompt ids, and the number of passages per model is not equal (so groups are incomplete). Clustering Qwen3-Embedding vectors (threshold tuned on train) recovers the prompts with ARI 0.988 on our test split; `shared/prompt_groups.py` has the helpers and notebook step 7b.3 the simulation.
 4. **For the TA,** present A1 and A2 as a use of the dataset's design, not as a better model.
-5. **Next:** add A1 and A2 to the notebook as an extra step, and apply the centring to the Qwen3 embeddings and to the fine-tuned model's pooled vectors.
+5. **Next:** A1 is now notebook step 7b, for LUSR and both Qwen3 embeddings (Qwen3-Base gains most: 34.2% → 48.7%). Still to do: add A2 to the notebook, try the MLPs on centred embeddings, and apply the centring to the fine-tuned model's pooled vectors.
 
 ### B. Making the fine-tuned model pay off
 

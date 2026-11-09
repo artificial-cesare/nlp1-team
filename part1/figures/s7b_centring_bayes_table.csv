@@ -1,0 +1,5 @@
+,A,B,folds,mean B−A,P(A>B),P(ROPE),P(B>A)
+0,lusr/logreg,lusr-promptcentred/logreg,50,0.0827,0.0,0.0,1.0
+1,qwen3-base-L14-mean/logreg,qwen3-base-L14-mean-promptcentred/logreg,50,0.1453,0.0,0.0,1.0
+2,qwen3-emb/logreg,qwen3-emb-promptcentred/logreg,50,0.0937,0.0,0.0,1.0
+3,lusr-promptcentred/logreg,qwen3-base-L14-mean-promptcentred/logreg,50,0.0468,0.0003,0.0097,0.99
