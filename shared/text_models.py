@@ -6,8 +6,11 @@
   (the setup of Sun et al. 2025), or only the top `train_layers` layers + head; `head_dropout` before the head.
 
 Protocol: for each outer fold, train on the inner-train part, pick the best epoch on the grouped inner validation
-set (early stopping), and score that checkpoint once on the outer fold. There is no refit, so each fold costs one
-training run. Results come back in the run_cv format, so eval_harness.compare and shared.analysis work unchanged.
+set (early stopping), and score that checkpoint once on the outer fold. By default there is no refit, so each fold
+costs one training run. With `refit=True` (fine-tuning only), the model is then retrained from scratch on the whole
+outer training fold (inner-train + inner-validation) for the selected number of epochs, and that model is scored,
+as eval_harness does for the MLPs. Results come back in the run_cv format, so eval_harness.compare and
+shared.analysis work unchanged.
 """
 
 from __future__ import annotations
@@ -171,10 +174,18 @@ class FinetuneClassifier:
                 out.append(model(ids, am).float().cpu())
         return torch.cat(out)
 
-    def fit(self, texts_tr, y_tr, texts_va, y_va, n_classes, seed=H.SEED):
+    def fit(self, texts_tr, y_tr, texts_va, y_va, n_classes, seed=H.SEED, stop_after=None):
+        """Train for p["epochs"] epochs and keep the best epoch on (texts_va, y_va).
+
+        Refit mode (texts_va=None, stop_after=e): no validation; follow the same p["epochs"]-epoch LR schedule but
+        stop after epoch e and keep that model, so the refit sees the LR trajectory that was validated.
+        """
         from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
         p = self.p
+        refit = texts_va is None
+        if refit and not stop_after:
+            raise ValueError("refit mode (texts_va=None) needs stop_after = number of epochs")
         torch.manual_seed(seed)
         rng = np.random.default_rng(seed)
         self.tok_ = AutoTokenizer.from_pretrained(p["model_id"])
@@ -200,6 +211,11 @@ class FinetuneClassifier:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step()
                 sched.step()
+            if refit:
+                self.history_.append({"epoch": ep, "train_loss": float(np.mean(losses))})
+                if ep == stop_after:
+                    break
+                continue
             val_logits = self._logits(model, list(texts_va))
             val = balanced_accuracy_score(y_va, val_logits.argmax(1).numpy())
             val_loss = lossf(val_logits, torch.as_tensor(y_va)).item()
@@ -208,7 +224,10 @@ class FinetuneClassifier:
             if val > best:
                 best, self.best_epoch_ = val, ep
                 state = {k: v.detach().to("cpu", copy=True) for k, v in model.state_dict().items()}
-        model.load_state_dict(state)
+        if refit:
+            best, self.best_epoch_ = float("nan"), stop_after
+        else:
+            model.load_state_dict(state)
         self.model_, self.val_score_ = model, best
         return self
 
@@ -222,13 +241,27 @@ class FinetuneClassifier:
 
 
 # --------------------------------------------------------------------------- CV loop (run_cv format)
+def _refit_finetune(est, p, fixed, texts, y, idx, n_classes, seed):
+    """Retrain the selected fine-tuning setup on all of `idx` for est.best_epoch_ epochs (frees `est` first)."""
+    epochs, inner_val, history = est.best_epoch_, est.val_score_, est.history_
+    est.release()
+    est = FinetuneClassifier(**{**fixed, **p}).fit([texts[i] for i in idx], y[idx], None, None, n_classes,
+                                                   seed=seed, stop_after=epochs)
+    est.val_score_, est.history_ = inner_val, history  # report the selection run's validation curve
+    return est
+
+
 def run_cv_text(texts, y, groups, folds, kind: str, grid: dict | None = None, name: str | None = None,
-                verbose: bool = True, **fixed) -> dict:
+                verbose: bool = True, refit: bool = False, **fixed) -> dict:
     """kind = "transformer" (token ids from shared.tokenization) or "finetune" (raw text).
 
     For each outer fold: every grid point is trained on the inner-train part with early stopping on the inner
-    validation part; the best one (by inner balanced accuracy) is scored on the outer fold.
+    validation part; the best one (by inner balanced accuracy) is scored on the outer fold. With refit=True
+    (finetune only), the selected setup is first retrained on the whole outer training fold for the selected
+    number of epochs.
     """
+    if refit and kind != "finetune":
+        raise ValueError("refit is implemented for kind='finetune' only")
     texts, y, groups = list(texts), np.asarray(y), np.asarray(groups)
     n_classes = int(y.max()) + 1
     if kind == "transformer":
@@ -252,6 +285,8 @@ def run_cv_text(texts, y, groups, folds, kind: str, grid: dict | None = None, na
             elif hasattr(est, "release"):
                 est.release()
         est, p = best
+        if refit:
+            est = _refit_finetune(est, p, fixed, data, y, tr, n_classes, seed=H.SEED + r)
         proba = est.predict_proba([data[i] for i in te])
         pred = proba.argmax(1)
         rows.append({"repeat": r, "fold": k, **H.scores(y[te], pred), "inner_val": est.val_score_, "params": p,
@@ -265,16 +300,20 @@ def run_cv_text(texts, y, groups, folds, kind: str, grid: dict | None = None, na
             print(f"  fold {r}.{k}: bal.acc {rows[-1]['balanced_accuracy']:.4f} (epoch {est.best_epoch_}, {p}) "
                   f"{time.time() - t0:.0f}s")
     res = {"name": name or kind, "model": kind, "folds": rows, "oof_pred": oof_pred, "oof_proba": oof_proba,
-           "seconds": time.time() - t0, "runs": len({f[0] for f in folds}), "fixed": fixed}
+           "seconds": time.time() - t0, "runs": len({f[0] for f in folds}), "fixed": fixed, "refit": refit}
     if verbose:
         ba = H.fold_scores(res)
         print(f"{res['name']:28s} bal.acc {ba.mean():.4f} ± {ba.std():.4f}  ({len(rows)} folds, {res['seconds']:.0f}s)")
     return res
 
 
-def final_test_text(texts_train, y, groups, texts_test, y_test, kind: str, params: dict | None = None, **fixed) -> dict:
+def final_test_text(texts_train, y, groups, texts_test, y_test, kind: str, params: dict | None = None,
+                    refit: bool = False, **fixed) -> dict:
     """The single held-out evaluation for a text model: train on an inner grouped split of the full train split
-    (early stopping on its validation part), then score the test split once."""
+    (early stopping on its validation part), then score the test split once. With refit=True (finetune only), the
+    model is then retrained on the whole train split for the selected number of epochs before scoring."""
+    if refit and kind != "finetune":
+        raise ValueError("refit is implemented for kind='finetune' only")
     H.set_seed(H.SEED)
     y, groups = np.asarray(y), np.asarray(groups)
     itr, iva = H.inner_split(np.arange(len(y)), groups)
@@ -286,6 +325,8 @@ def final_test_text(texts_train, y, groups, texts_test, y_test, kind: str, param
         tr_data, te_data = list(texts_train), list(texts_test)
         est = FinetuneClassifier(**fixed, **(params or {}))
     est.fit([tr_data[i] for i in itr], y[itr], [tr_data[i] for i in iva], y[iva], int(y.max()) + 1, seed=H.SEED)
+    if refit:
+        est = _refit_finetune(est, params or {}, fixed, tr_data, y, np.arange(len(y)), int(y.max()) + 1, seed=H.SEED)
     pred = est.predict_proba(te_data).argmax(1)
     out = {"model": kind, **H.scores(y_test, pred), "inner_val": est.val_score_, "epochs": est.best_epoch_, "pred": pred}
     if hasattr(est, "release"):

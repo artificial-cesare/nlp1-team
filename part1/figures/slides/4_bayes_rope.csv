@@ -1,12 +1,12 @@
-group,comparison (B vs A),A,B,folds,mean B−A (pp),P(A better),P(ROPE),P(B better)
-Representation,"Indicators vs bag-of-words (2k, LR)",bow-ours2k/logreg,indicator-ours2k/logreg,50,-0.5278,0.3144,0.6246,0.061
-Representation,LUSR embedding vs best bag-of-words (LR),bow-ours2k/logreg_scale_tuned,lusr/logreg,50,6.0592,0.0001,0.0023,0.9976
-Representation,Qwen3-Base L14 vs LUSR (LR),lusr/logreg,qwen3-base-L14-mean/logreg,50,-1.5864,0.6418,0.3015,0.0567
-Representation,Qwen3-Embedding vs Qwen3-Base (LR),qwen3-base-L14-mean/logreg,qwen3-emb/logreg,50,-18.1053,1.0,0.0,0.0
-Architecture (LUSR),MLP vs LR,lusr/logreg,lusr/mlp,50,-0.7234,0.4135,0.498,0.0885
-Architecture (LUSR),Residual MLP vs LR,lusr/logreg,lusr/resmlp,50,-0.1029,0.2119,0.6249,0.1632
-Learning the representation (5 folds),Transformer from scratch vs frozen LUSR + LR,lusr/logreg,roberta-ids/transformer,5,-15.1349,0.9984,0.0006,0.001
-Learning the representation (5 folds),Full fine-tuning vs frozen LUSR + LR,lusr/logreg,lusr-finetune/finetune,5,-2.9167,0.8196,0.129,0.0514
-Learning the representation (5 folds),Top-4 fine-tuning + refit vs frozen LUSR + LR,lusr/logreg,lusr-finetune-top4-refit/finetune,5,0.783,0.2758,0.2538,0.4704
-Prompt-centring,Centred vs raw LUSR (LR),lusr/logreg,lusr-promptcentred/logreg,50,8.2657,0.0,0.0,1.0
-Prompt-centring,Centred Qwen3-Base vs centred LUSR (LR),lusr-promptcentred/logreg,qwen3-base-L14-mean-promptcentred/logreg,50,4.6806,0.0003,0.0097,0.99
+group,comparison (A vs B),A,B,folds,mean B−A (pp),P(A better),P(ROPE),P(B better)
+Representation,"Indicators vs bag-of-words (8k BPE, LR)",indicator-ours8k/logreg_unscaled,bow-ours8k/logreg_unscaled,50,3.2971,0.0015,0.0497,0.9488
+Representation,Best bag-of-words (LUSR tokeniser) vs LUSR embedding (LR),bow-lusr/logreg_unscaled,lusr/logreg,50,2.9797,0.0085,0.1041,0.8874
+Representation,LUSR vs Qwen3-Base L14 (LR),lusr/logreg,qwen3-base-L14-mean/logreg,50,-1.5864,0.6418,0.3015,0.0567
+Representation,Qwen3-Base vs Qwen3-Embedding (LR),qwen3-base-L14-mean/logreg,qwen3-emb/logreg,50,-18.1053,1.0,0.0,0.0
+Architecture (LUSR),LR vs MLP,lusr/logreg,lusr/mlp,50,-0.7234,0.4135,0.498,0.0885
+Architecture (LUSR),LR vs residual MLP,lusr/logreg,lusr/resmlp,50,-0.1029,0.2119,0.6249,0.1632
+Learning the representation (5 folds),Frozen LUSR + LR vs transformer from scratch,lusr/logreg,roberta-ids/transformer,5,-15.1349,0.9984,0.0006,0.001
+Learning the representation (5 folds),Frozen LUSR + LR vs full fine-tuning,lusr/logreg,lusr-finetune/finetune,5,-2.9167,0.8196,0.129,0.0514
+Learning the representation (5 folds),Frozen LUSR + LR vs top-4 fine-tuning + refit,lusr/logreg,lusr-finetune-top4-refit/finetune,5,0.783,0.2758,0.2538,0.4704
+Prompt-centring,Raw vs centred LUSR (LR),lusr/logreg,lusr-promptcentred/logreg,50,8.2657,0.0,0.0,1.0
+Prompt-centring,Centred LUSR vs centred Qwen3-Base (LR),lusr-promptcentred/logreg,qwen3-base-L14-mean-promptcentred/logreg,50,4.6806,0.0003,0.0097,0.99

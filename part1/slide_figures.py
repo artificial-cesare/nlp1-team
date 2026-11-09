@@ -139,30 +139,38 @@ def seq_fill(v, lo=10, hi=50):
 # --------------------------------------------------------------------------- 1 · hyperparameters
 def table_hyperparameters():
     lr_emb = ", ".join(f"{json.loads(k)['C']:g} ({v})" for k, v in modal("lusr/logreg", n=2))
-    lr_tok = ", ".join(f"{json.loads(k)['C']:g} ({v})" for k, v in modal("bow-ours2k/logreg", n=2))
+    lr_tok = ", ".join(f"{json.loads(k)['C']:g} ({v})" for k, v in modal("bow-ours2k/logreg_scale_tuned", n=2))
     mlp = json.loads(modal("lusr/mlp")[0][0])
     res = json.loads(modal("lusr/resmlp")[0][0])
     no_scale_bow = sum(not f["params"]["scale"] for f in R["bow-ours2k/logreg_scale_tuned"]["folds"])
     no_scale_ind = sum(not f["params"]["scale"] for f in R["indicator-ours2k/logreg_scale_tuned"]["folds"])
+    # gain from switching standardisation off on the count features (outer folds; MLPs on their 5 common folds)
+    count_reps = [k.split("/")[0] for k in R if k.endswith("/logreg_unscaled")]
+    gain = lambda m: [100 * H.compare(R[f"{r}/{m}-sdfix" if m != "logreg" else f"{r}/{m}"],  # noqa: E731
+                                      R[f"{r}/{m}_unscaled"])["mean_diff"]
+                      for r in count_reps if f"{r}/{m}_unscaled" in R and (m == "logreg" or f"{r}/{m}-sdfix" in R)]
+    g_lr, g_mlp, g_res = gain("logreg"), gain("mlp"), gain("resmlp")
     ep = lambda n: ", ".join(str(f["epochs"]) for f in R[n]["folds"])  # noqa: E731
     d_tr = Counter(f["params"]["d_model"] for f in R["roberta-ids/transformer"]["folds"])
     header = ["Model", "Tuned on the inner validation split", "Settings", "Fixed (not tuned)",
               "Most often chosen (folds)"]
     rows = [
-        ["Logistic regression (multinomial)", "C (inverse L2 strength) ∈ {1e-4, 1e-3, 1e-2, 0.1, 1, 10}", "6",
-         "StandardScaler, L-BFGS, max 3,000 iterations",
-         f"LUSR embedding: C = {lr_emb} of 50; BoW 2k: C = {lr_tok} of 50"],
-        ["Logistic regression, one-vs-rest", "nothing", "1", "C = 0.01 (cheap check)", "–"],
-        ["Logistic regression, scaling tuned (extra)", "C ∈ {1e-4 … 1e4} (9 values) × standardise {yes, no}",
-         "18", "as above", f"no scaling in {no_scale_bow}/50 folds (BoW 2k) and {no_scale_ind}/50 (indicators 2k)"],
-        ["MLP, 1 hidden layer", "width {256, 1024} × dropout {0.2, 0.5} × learning rate {1e-3, 3e-4} × weight "
-         "decay {1e-4, 1e-2}; + number of epochs (early stopping)", "16",
-         "ReLU, input dropout = dropout/2, AdamW, batch 64, ≤ 200 epochs, patience 15, standardised input",
-         f"LUSR: width {mlp['hidden']}, dropout {mlp['dropout']}, lr {mlp['lr']:g}"],
-        ["Residual MLP", "blocks {2, 3} × width {256, 512} × dropout {0.3, 0.5} × learning rate {1e-3, 3e-4}; + "
-         "number of epochs (early stopping)", "16",
+        ["Logistic regression (multinomial)",
+         "standardise input {yes, no} × C (inverse L2 strength) ∈ {1e-4, 1e-3, …, 1e4} (9 values)", "18",
+         "L-BFGS, max 3,000 iterations",
+         f"count features: no scaling in {no_scale_bow}/50 folds (BoW 2k) and {no_scale_ind}/50 (indicators 2k); "
+         f"BoW 2k: C = {lr_tok} of 50. Embeddings: standardised, LUSR C = {lr_emb} of 50"],
+        ["Logistic regression, one-vs-rest", "nothing", "1", "C = 0.01, standardised (cheap check)", "–"],
+        ["MLP, 1 hidden layer", "standardise input {yes, no} × width {256, 1024} × dropout {0.2, 0.5} × learning "
+         "rate {1e-3, 3e-4} × weight decay {1e-4, 1e-2}; + number of epochs (early stopping)", "2 × 16",
+         "ReLU, input dropout = dropout/2, AdamW, batch 64, ≤ 200 epochs, patience 15",
+         f"count features: no scaling (+{min(g_mlp):.1f} to +{max(g_mlp):.1f} pp). LUSR: standardised, width "
+         f"{mlp['hidden']}, dropout {mlp['dropout']}, lr {mlp['lr']:g}"],
+        ["Residual MLP", "standardise input {yes, no} × blocks {2, 3} × width {256, 512} × dropout {0.3, 0.5} × "
+         "learning rate {1e-3, 3e-4}; + number of epochs (early stopping)", "2 × 16",
          "pre-LayerNorm blocks, GELU, weight decay 1e-2, AdamW, batch 64, patience 15",
-         f"LUSR: {res['layers']} blocks, width {res['hidden']}, dropout {res['dropout']}, lr {res['lr']:g}"],
+         f"count features: no scaling ({abs(min(g_res)) if abs(min(g_res)) < 0.05 else min(g_res):+.1f} to +{max(g_res):.1f} pp). LUSR: standardised, "
+         f"{res['layers']} blocks, width {res['hidden']}, dropout {res['dropout']}, lr {res['lr']:g}"],
         ["Transformer from scratch", "d_model {128, 256}; + number of epochs (early stopping)", "2",
          "2 layers, 4 heads, FF 4·d, dropout 0.1, lr 5e-4, weight decay 0.01, batch 32, ≤ 60 epochs, patience 8; "
          "vocabulary = RoBERTa ids seen ≥ 2× in the training part",
@@ -175,24 +183,29 @@ def table_hyperparameters():
          "as above but lr 5e-5, head dropout 0.1, lower layers and embeddings frozen",
          f"top 4: epochs {ep('lusr-finetune-top4-refit/finetune')}"],
         ["Prompt recovery for centring (Kaggle)", "clustering distance threshold, by adjusted Rand index on the "
-         "train split", "159", "average linkage, cosine distance on Qwen3-Embedding vectors",
+         "train split", "158 (1 threshold)", "average linkage, cosine distance on Qwen3-Embedding vectors",
          "threshold 0.385 (ARI 0.988 on the test split)"],
     ]
     foot = ("Nested CV: the setting is chosen on an inner 20% of each training fold (split by prompt), refit on the "
             "whole training fold and scored once on the outer fold, so the reported scores are not used to tune.\n"
-            "Chosen by comparing systems on the outer folds, not tuned per fold: tokeniser vocabulary (2k), Qwen "
+            f"Standardisation: the inner split switched it off for logistic regression on the 2k count features, so "
+            f"it was switched off for every count feature set and model ({min(g_lr):+.1f} to {max(g_lr):+.1f} pp "
+            f"for logistic regression on the outer folds); dense embeddings and the length baseline stay "
+            f"standardised, with C ∈ {{1e-4 … 10}}.\n"
+            "Chosen by comparing systems on the outer folds, not tuned per fold: tokeniser vocabulary, Qwen "
             "layer (14, fixed in advance), pooling (mean vs mean‖max), fine-tuning variant (top 4), ROPE (1 pp).")
-    draw_table(header, rows, [1.9, 3.0, 0.75, 3.1, 2.6], OUT / "1_hyperparameters.png",
+    draw_table(header, rows, [1.9, 3.0, 0.9, 3.0, 2.6], OUT / "1_hyperparameters.png",
                "Hyperparameters tuned per model", "nested cross-validation, 50 folds (5 for the slow models)",
                footnote=foot, font=8.5)
     pd.DataFrame(rows, columns=header).to_csv(OUT / "1_hyperparameters.csv", index=False)
     # slide version: the rubric architectures plus the two end-to-end models, without the "fixed" column
-    keep_rows, keep_cols = [0, 3, 4, 5, 7], [0, 1, 2, 4]
+    keep_rows, keep_cols = [0, 2, 3, 4, 6], [0, 1, 2, 4]
     short = [[rows[i][j] for j in keep_cols] for i in keep_rows]
     draw_table([header[j] for j in keep_cols], short, [1.9, 3.4, 1.05, 3.0], OUT / "1b_hyperparameters_slide.png",
                "Hyperparameters tuned per model", "chosen on an inner validation split inside every CV fold "
                "(nested), then refit on the whole training fold", font=9,
-               footnote="Fixed settings, the full grid of every model and the extra models: 1_hyperparameters.png.")
+               footnote="Standardisation is switched off for count features and kept for dense embeddings. "
+                        "Fixed settings and the extra models: 1_hyperparameters.png.")
 
 
 # --------------------------------------------------------------------------- 2 · model comparison
@@ -227,7 +240,9 @@ def table_models(reps=None, stem="2_model_comparison", slide=False):
                 if end_to_end:
                     name = end_to_end[0] if j == 1 else None
                 else:
-                    name = next((n for n in (f"{key}/{m}-sdfix", f"{key}/{m}") if n in R), None)
+                    # count features: unscaled runs; embeddings and length: standardised (-sdfix for MLPs)
+                    name = next((n for n in (f"{key}/{m}_unscaled", f"{key}/{m}-sdfix", f"{key}/{m}") if n in R),
+                                None)
                 if name is None:
                     row.append("–" if end_to_end else "not run")
                     fills[(len(rows), j)] = (None, MUTED)
@@ -250,12 +265,13 @@ def table_models(reps=None, stem="2_model_comparison", slide=False):
             "5 folds). The end-to-end models finish with a linear softmax layer, so they sit in the first column. "
             "★ = best system: prompt-centred Qwen3-Base + logistic regression (47.6% on the held-out test split with "
             "prompts recovered by clustering).\n"
-            "Extra: letting the inner split switch off input scaling lifts logistic regression on bag-of-words "
-            f"2k to {fmt('bow-ours2k/logreg_scale_tuned', sd=False)}% and on indicators 2k to "
-            f"{fmt('indicator-ours2k/logreg_scale_tuned', sd=False)}%.")
+            "Count features (indicators, bag-of-words, character n-grams) are not standardised: the inner split "
+            "switched standardisation off, and dropping it gains 1–13 pp for logistic regression. Embeddings and "
+            "the length baseline are standardised.")
     if slide:
         foot = ("Balanced accuracy (%), mean ± sd over 50 CV folds; † = first 5 folds only. Chance 5.6%. "
                 "★ best system (47.6% on the held-out test split, prompts recovered by clustering). "
+                "Count features unscaled, embeddings standardised. "
                 "All rows: 2_model_comparison.png.")
     draw_table(header, rows, [3.1, 2.0, 1.5, 1.5], OUT / f"{stem}.png",
                "Models and representations", "cross-validated balanced accuracy (%), grouped by prompt",
@@ -357,24 +373,24 @@ def table_transformers():
 def figure_bayes():
     groups = [
         ("Representation", [
-            ("bow-ours2k/logreg", "indicator-ours2k/logreg", "Indicators vs bag-of-words (2k, LR)"),
-            ("bow-ours2k/logreg_scale_tuned", "lusr/logreg", "LUSR embedding vs best bag-of-words (LR)"),
-            ("lusr/logreg", "qwen3-base-L14-mean/logreg", "Qwen3-Base L14 vs LUSR (LR)"),
-            ("qwen3-base-L14-mean/logreg", "qwen3-emb/logreg", "Qwen3-Embedding vs Qwen3-Base (LR)"),
+            ("indicator-ours8k/logreg_unscaled", "bow-ours8k/logreg_unscaled", "Indicators vs bag-of-words (8k BPE, LR)"),
+            ("bow-lusr/logreg_unscaled", "lusr/logreg", "Best bag-of-words (LUSR tokeniser) vs LUSR embedding (LR)"),
+            ("lusr/logreg", "qwen3-base-L14-mean/logreg", "LUSR vs Qwen3-Base L14 (LR)"),
+            ("qwen3-base-L14-mean/logreg", "qwen3-emb/logreg", "Qwen3-Base vs Qwen3-Embedding (LR)"),
         ]),
         ("Architecture (LUSR)", [
-            ("lusr/logreg", "lusr/mlp", "MLP vs LR"),
-            ("lusr/logreg", "lusr/resmlp", "Residual MLP vs LR"),
+            ("lusr/logreg", "lusr/mlp", "LR vs MLP"),
+            ("lusr/logreg", "lusr/resmlp", "LR vs residual MLP"),
         ]),
         ("Learning the representation (5 folds)", [
-            ("lusr/logreg", "roberta-ids/transformer", "Transformer from scratch vs frozen LUSR + LR"),
-            ("lusr/logreg", "lusr-finetune/finetune", "Full fine-tuning vs frozen LUSR + LR"),
-            ("lusr/logreg", "lusr-finetune-top4-refit/finetune", "Top-4 fine-tuning + refit vs frozen LUSR + LR"),
+            ("lusr/logreg", "roberta-ids/transformer", "Frozen LUSR + LR vs transformer from scratch"),
+            ("lusr/logreg", "lusr-finetune/finetune", "Frozen LUSR + LR vs full fine-tuning"),
+            ("lusr/logreg", "lusr-finetune-top4-refit/finetune", "Frozen LUSR + LR vs top-4 fine-tuning + refit"),
         ]),
         ("Prompt-centring", [
-            ("lusr/logreg", "lusr-promptcentred/logreg", "Centred vs raw LUSR (LR)"),
+            ("lusr/logreg", "lusr-promptcentred/logreg", "Raw vs centred LUSR (LR)"),
             ("lusr-promptcentred/logreg", "qwen3-base-L14-mean-promptcentred/logreg",
-             "Centred Qwen3-Base vs centred LUSR (LR)"),
+             "Centred LUSR vs centred Qwen3-Base (LR)"),
         ]),
     ]
     items, csv = [], []
@@ -382,7 +398,7 @@ def figure_bayes():
         for a, b, label in pairs:
             c = H.compare(R[a], R[b])
             items.append((g, label, c))
-            csv.append({"group": g, "comparison (B vs A)": label, "A": a, "B": b, "folds": c["n_folds"],
+            csv.append({"group": g, "comparison (A vs B)": label, "A": a, "B": b, "folds": c["n_folds"],
                         "mean B−A (pp)": 100 * c["mean_diff"], "P(A better)": c["p_a_better"],
                         "P(ROPE)": c["p_rope"], "P(B better)": c["p_b_better"]})
     n = len(items)
@@ -425,6 +441,8 @@ def figure_bayes():
     ax.set_yticks([])
     ax.set_xlabel("B − A, balanced accuracy (percentage points); line = 95% credible interval")
     ax.text(0, -1.15, "ROPE ±1 pp", ha="center", fontsize=8, color=INK2)
+    ax.text(-5, -1.15, "← A better", ha="right", fontsize=8.5, color=ORANGE, weight="bold")
+    ax.text(5, -1.15, "B better →", ha="left", fontsize=8.5, color=BLUE, weight="bold")
     ax.grid(axis="x", color=RULE, lw=0.5)
     ax.set_axisbelow(True)
     for s in ("top", "right", "left"):
@@ -437,7 +455,7 @@ def figure_bayes():
     bx.legend(handles, ["A better", "practically equivalent (ROPE)", "B better"], loc="lower center",
               bbox_to_anchor=(0.5, 1.0), ncol=3, frameon=False, fontsize=8, handlelength=1, columnspacing=1)
     fig.suptitle("Bayesian correlated t-test, ROPE = 1 pp", x=0.02, ha="left", fontsize=13, weight="bold", y=0.975)
-    fig.text(0.02, 0.925, "Each row: system B vs system A on the same folds (50; the first 5 for fine-tuning and the "
+    fig.text(0.02, 0.925, "Each row: system A vs system B on the same folds (50; the first 5 for fine-tuning and the "
              "transformer). Point = posterior mean of B − A, printed on the right.\nColour: blue = B better with "
              "P > 0.95, orange = A better with P > 0.95, grey = undecided.", fontsize=9, color=INK2, va="top")
     fig.subplots_adjust(left=0.33, right=0.98, top=0.84, bottom=0.1)
@@ -636,7 +654,7 @@ def figure_progression():
     t7, tc, kl, clus, ft = _test_numbers()
     steps = [
         ("Length only (baseline)", "length/logreg", None),
-        ("Best token features: character 2–4-grams", "char-2-4grams/logreg", None),
+        ("Best token features (bag-of-words)", "bow-lusr/logreg_unscaled", None),
         ("LUSR style embedding", "lusr/logreg", 100 * t7["lusr/logreg"]),
         ("LUSR fine-tuned (top 4 layers + refit)", "lusr-finetune-top4-refit/finetune", 100 * ft["refit"]["balanced_accuracy"]),
         ("Prompt-centred LUSR", "lusr-promptcentred/logreg", clus("lusr")),
