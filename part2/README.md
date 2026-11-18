@@ -5,7 +5,7 @@ Notebook: [`cesare_word_embeddings.ipynb`](cesare_word_embeddings.ipynb). Full w
 ## What was done
 
 - **Compared 4 cased English embeddings:** word2vec GoogleNews, fastText Wikipedia, fastText Common Crawl, GloVe 840B.
-- **Wrote one tokeniser per model** (`EmbTokenizer` in `wordvecs.py`). Each model's settings were read off its vocabulary: how it splits `don't`, whether it keeps punctuation, curly quotes, digits.
+- **Wrote one tokeniser per model** (`EmbTokenizer` in `wordvecs.py`). The papers name the training tokenisers (fastText: Moses; GloVe: Stanford) but not their settings, so each rule was checked against the model's vocabulary: how it splits `don't`, whether it keeps punctuation, curly quotes, digits.
 - **Measured coverage:** fastText and GloVe cover over 99.9% of our tokens. word2vec misses 22%, mostly punctuation and *a/and/of/to*, which is exactly the style signal.
 - **Explored the space:** it captures meaning well and style only partly. An averaged text vector is mostly topic (the prompt explains about 65% of its variance).
 - **Probed downstream:** logistic regression on mean-pooled vectors, shared 50 folds, balanced accuracy (chance 5.6%):

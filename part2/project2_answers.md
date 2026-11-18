@@ -27,7 +27,12 @@ fastText had the best performance (Common Crawl and Wikipedia are practically ti
 
 ### Can you tokenize your texts in a way coherent with the definition of a token in the embedding model?
 
-**Yes, but not with the tutorial's tokeniser, and the rules differ per model.** The documentation barely describes how these corpora were tokenised, so we read the rules off each vocabulary (a word's row number is its frequency rank, so "absent" means the training tokeniser never produced it):
+**Yes, but not with the tutorial's tokeniser, and the rules differ per model.** What the documentation says:
+- **fastText** (both English releases): the paper names the tokeniser, the Moses MT project's `tokenizer.perl` (Mikolov et al. 2018, *Advances in Pre-Training Distributed Word Representations*). The download page says nothing.
+- **GloVe:** the paper says the corpora were tokenised *and lowercased* with the Stanford tokeniser (Pennington et al. 2014). The 840B release is cased, so that description does not fully apply to it; the release itself is documented only as "cased".
+- **word2vec GoogleNews:** no preprocessing is documented at all.
+
+The papers name tools but not their settings, so we checked every rule against the vocabulary (a word's row number is its frequency rank, so "absent" means the training tokeniser never produced it). Docs and vocabulary agree. For example, Moses splits `don't` into `don` + `'t`, keeps `well-known` whole, and treats a curly `’` as ordinary punctuation, so `’` becomes a token of its own. That is why fastText has `’` but no `’s` or `’t`.
 
 | | word2vec | fastText | GloVe 840B |
 |---|---|---|---|
@@ -35,7 +40,7 @@ fastText had the best performance (Common Crawl and Wikipedia are practically ti
 | Punctuation | **none at all** | every mark is a token (`—` `’` `“` `;` …) | every mark is a token, but typographic ones are rare |
 | `don't` | `don't` (whole) | `don` + `'t` | `do` + `n't` |
 | `it’s` (curly) | — | absent; we fold it to `'s` or keep `’` as its own token | `it` + `’s` (has curly forms) |
-| `a`, `and`, `of`, `to` | **removed** | kept | kept |
+| `a`, `and`, `of`, `to` | **removed** (`the` mostly removed too: rank 11, below `The`) | kept | kept |
 | Digits | `1990` → `####` | kept | kept |
 
 We wrote one tokeniser (`part2/wordvecs.py`, `EmbTokenizer`) that never changes the text, only how a token is looked up. Each model gets its own settings, which are stored in `WV.TOKENIZER_CONFIG`.
@@ -110,7 +115,40 @@ The tutorial pipeline lowercases everything, turns `"` into ` `` `/`''`, and pro
 * What design choices have meaningful impact in classification performance (eg, embedding size, architecture design, optimisation parameters), if any?
 * Is this better than what you could achieve last week? In other words, did pretrained embeddings add to your design?
 
-_Answer:_
+_Answer (first bullet): initial answer by Cesare from the step 2 probe. For my G liam: mean vs sum vs max pooling, and frozen vs trainable embeddings
+
+**How we pool.** Each text is tokenised with the embedding's own tokeniser (`EmbTokenizer`, settings in `WV.TOKENIZER_CONFIG`). Every token is looked up in the 300d table, which stays frozen, and the text vector is the **mean** of its token vectors (about 134 per text). There are two implementations:
+- **Probe (step 2.5):** `WV.pool` averages the tokens that have a vector and skips unknown ones (0.05% of tokens). A logistic regression is then trained on the result.
+- **Neural model (step 3):** `clslib.EmbedAndPoolEncoder`, run with `embcv.run_cv_torch`. It averages all non-padding tokens; an unknown token maps to `<unk>`, whose vector is the mean of the whole table. `enc_kwargs={"average_pool": False}` gives the sum instead. The pooled vector then goes into the MLP head.
+- **Prompt-centred** variants subtract, from each pooled vector, the mean pooled vector of all texts written for the same prompt (`shared.prompt_groups.prompt_centre`). This uses no author labels.
+
+**Design choices tested so far, largest effect first** (balanced accuracy; P from the Bayesian correlated t-test, ROPE 1 pp):
+
+| Choice | Effect | Evidence |
+|---|---|---|
+| Prompt-centring the pooled vector | **+12 pp** (28.5% → 40.6%) | probe, 50 folds |
+| Head and training budget | default MLP (50×50, 20 epochs) is **9.7 pp below** logistic regression on the same vectors (19.8%, P = 0.997); its best epoch was 17–19 of 20 in every fold, so it is undertrained | 5 folds |
+| Which embedding | fastText vs word2vec +3.1 / +5.5 pp (P = 0.92 / ≈ 1.00); vs GloVe +1.6 / +1.9 pp (P = 0.66 / 0.79); the two fastText corpora are equivalent | probe, raw / centred |
+| Which tokens are pooled | function words + punctuation alone: 27.1%, +5.0 pp over content words (P = 0.998), about equal to all tokens | probe |
+| Curly quotes | folding `’` into `'` loses 0.8 pp (P(fold better) = 0.004) | probe |
+| Our tokeniser vs the tutorial's | inside the ROPE for mean pooling | probe |
+| Embedding size | **not tested yet**; `emb.pca(k)` gives the same table at k dims | |
+| Pooling function (mean / sum / max) | **not tested yet**; sum is a flag, max needs a few lines in the encoder | |
+| Frozen vs trainable embeddings | **not tested yet**; `enc_kwargs={"freeze_embeddings": False}` | |
+
+**Tentative answer:** so far, **what goes into the pooled vector** matters much more than the classifier: prompt-centring, the choice of embedding and which tokens are pooled move results by 2–12 pp. The architecture and optimiser matter mainly because the default head is undertrained.
+
+**Suggested next steps for Liam, in order:**
+1. **Fix the head first:** more epochs (`embcv` already early-stops on an inner split) or a higher learning rate, until the MLP at least matches logistic regression (28.5%). Otherwise every other comparison measures undertraining.
+2. **Prompt-centring inside the neural model** (largest known effect).
+3. **Embedding size:** `emb.pca(50/100/200)` vs 300, everything else fixed.
+4. **Pooling:** mean vs sum vs max, or mean and max concatenated (max may keep rare cues such as the em dash that the mean dilutes).
+5. **Frozen vs trainable embeddings.**
+6. **GloVe as the second embedding** (`WV.load_subset("glove-840b")`).
+
+Compare each pair with `H.compare` (ROPE 1 pp). If a difference is under about 2 pp, run `repeats=2` or more before concluding.
+
+_Answer (second bullet):_
 
 ## 4. Experiment with a recurrent encoder (GRU or LSTM). — **@KAZIK**
 * What design choices have meaningful impact in classification performance, if any?
@@ -147,7 +185,7 @@ The plan was written before the notebook; the notebook was written from `part2/T
 | Punctuation glued to words as separate embeddings (`hence,`) | idea | tested | **No such tokens exist.** None of the tables has `hence,` or `however,`. fastText's ~21k `word.` types are noise (`light.`), not a convention we could use. Use separate punctuation tokens. |
 | ≥ 2 hyperparameters per algorithm (dims, `minn`/`maxn`) | yes | corpus/size tested for fastText (wiki 1M vs crawl 2M: equivalent) | **Partly feasible.** The official cased fastText and GloVe releases exist only at 300d, and `minn`/`maxn` only matter when *training* fastText. Workable size axis: `emb.pca(k)` (same model, k dims; added for step 3), or GloVe 6B 50/100/200/300d (uncased, so case would be lost too). |
 | Train our own embeddings | if quick | not done | **Not worth it as a separate model.** We have about 290k tokens; the pretrained models saw 16–840 *billion*. Vectors trained on our data alone would be poor. Step 4's "random initialisation, trainable" *is* training our own embeddings, end to end on the task, so that cell of the grid answers the question. (gensim also doesn't install on Python 3.14.) |
-| Tokeniser "from the docs" | read docs | read the **vocabulary** | **The notebook's approach is more reliable.** The docs say little; the vocabulary showed, for example, that fastText splits `don't` into `don` + `'t` (not NLTK's `do` + `n't`), and that word2vec deleted *a/and/of/to*. The docs do help for GloVe (Stanford tokeniser), and the vocabulary confirmed it. |
+| Tokeniser "from the docs" | read docs | read the **vocabulary** | **Both are needed, and they agree.** The papers name the tools (fastText: Moses `tokenizer.perl`; GloVe: Stanford tokeniser) but not their settings, and word2vec documents nothing. The vocabulary confirms each rule and shows what the docs leave out: fastText splits `don't` into `don` + `'t` (not NLTK's `do` + `n't`), and word2vec deleted *a/and/of/to*. |
 | Coverage "from Kazik's EDA" | use EDA stats | measured coverage directly, and checked every EDA cue | **Complementary.** Kazik's EDA gives the list of what must survive; coverage has to be measured with the embedding's own vocabulary. Status of his 14 features below. |
 | "Can any of the 2 recover order? `<hence,>` vs `<, hence>`" | question | answered | **No, neither can.** A static model gives *hence* one vector wherever it is, and averaging ignores order, so both orders give the same text vector. Order needs step 4 (LSTM) or n-gram features. This is a good minimal-pair test for Kazik's LSTM. |
 | Task-specific evidence "from the previous subquestion" | similarities | a downstream probe (logistic regression on the shared folds, Bayesian test) | **The probe is the stronger evidence:** similarity examples are anecdotes, the probe measures the task. |
@@ -186,9 +224,24 @@ word2vec loses most of the punctuation features, the digits and *of*.
 2. **The tutorial's default MLP head is undertrained on our data.** With 20 epochs the best epoch was the last or nearly the last in every fold (17–19). On the same 5 folds it is 9.7 pp below logistic regression on the same vectors (19.8%, P(logreg better) = 0.997). Start step 3 by giving it more epochs or a higher learning rate, and standardise the inputs, before comparing designs.
 3. **Prompt-centring inside the neural models.** Subtract each prompt's mean pooled vector: +12 pp for the probe; part 1 step 7b has the details.
 4. **A style channel.** Pool function words and punctuation separately (alone they already match all tokens, +5 pp over content words). Add a marker token for spaced em dashes, since whitespace is invisible otherwise.
-5. **Pooling that doesn't dilute rare cues:** max, mean+max, or IDF-weighted mean.
-6. **Embedding size:** `emb.pca(50/100/200)` against 300, with everything else fixed.
-7. **Second algorithm for step 3:** GloVe 840B (`WV.load_subset("glove-840b")`) is ready.
+5. **A negation strategy.** Static vectors don't encode what negation *means*:
+   - `not` is just another function word (its nearest neighbours in fastText are `necessarily`, `is`, `be`);
+   - opposites sit close together (`good`/`bad` 0.74);
+   - averaging hides negation: "The result is good." vs "The result is not good." has cosine 0.975, about the same as "The result is good." vs "The result is bad." (0.968).
+
+   For authorship, the habit matters more than the meaning, and the habit differs between authors (counts on our training texts):
+   - **Gemini negates about half as often** as every other family: 5.9–6.9 negations per 1,000 tokens vs 11.3–15.5. Negations counted: *not, no, never, nothing, nor, none, nobody, neither, nowhere, cannot* and `n't`.
+   - **Claude and GLM contract most:** `n't` is 4–16% of `n't` + `not` (Sonnet 5 highest at 16%). GPT, Gemini, Qwen and Kimi contract rarely (0–2%).
+
+   Our tokenisers keep negation as its own token (`'t` in fastText, `n't` in GloVe) and keep `don 't` apart from `do not`. So the pooled vector holds this signal, but only weakly: one token is about 1/134 of the mean. What to try, in order:
+   - **Explicit features:** negation rate and contraction share added next to the pooled vector. It's cheap; test it in the 2.5 probe first.
+   - **Minimal pair for step 4:** check whether the LSTM separates "The result is good." from "The result is not good.", which averaging cannot do.
+   - **Negation marking** (Das & Chen 2001; Pang et al. 2002): prefix `NOT_` to every word after a negation, up to the next punctuation mark. `NOT_` tokens have no pretrained vector, so this needs trainable embeddings, e.g. each initialised from its plain word.
+
+   One known quirk: fastText splits `won't` into `won` + `'t`, and `won` is the vector for *win*. GloVe's `wo` + `n't` avoids this. It's rare in our texts.
+6. **Pooling that doesn't dilute rare cues:** max, mean+max, or IDF-weighted mean.
+7. **Embedding size:** `emb.pca(50/100/200)` against 300, with everything else fixed.
+8. **Second algorithm for step 3:** GloVe 840B (`WV.load_subset("glove-840b")`) is ready.
 
 ---
 
