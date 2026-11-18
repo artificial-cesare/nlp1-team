@@ -1,0 +1,74 @@
+{
+  "w2v-gnews": {
+    "source_file": "word2vec-google-news-300.bin.gz",
+    "source_url": "https://github.com/RaRe-Technologies/gensim-data/releases/download/word2vec-google-news-300/word2vec-google-news-300.gz",
+    "source_sha256": "cdd97c3b73abcd8e1437ad3837b8faf98fc21258f61f031721fe3e2096ed89d9",
+    "tokenizer_config": {
+      "clitics": "backoff",
+      "hyphens": "backoff",
+      "digits": "hash",
+      "phrases": 3,
+      "curly": "fold",
+      "case_backoff": "lower"
+    },
+    "n_texts": 2702,
+    "n_types": 19790,
+    "subset_fingerprint": "834039cff3f70b404a24e9a653046e4c5f2e5fb802ccf30d3fb3f0313185a723",
+    "probe_bal_acc-raw": 0.2466,
+    "probe_bal_acc-promptcentred": 0.3462
+  },
+  "ft-wiki": {
+    "source_file": "wiki-news-300d-1M.vec.zip",
+    "source_url": "https://dl.fbaipublicfiles.com/fasttext/vectors-english/wiki-news-300d-1M.vec.zip",
+    "source_sha256": "bdeb85f44892c505953e3654183e9cb0d792ee51be0992460593e27198d746f8",
+    "tokenizer_config": {
+      "clitics": "split",
+      "hyphens": "backoff",
+      "digits": "keep",
+      "phrases": 1,
+      "curly": "mark",
+      "case_backoff": "lower"
+    },
+    "n_texts": 2702,
+    "n_types": 19415,
+    "subset_fingerprint": "5c61bc0502a848904b0b1e13f74bc3b190db1fcf57aae7c747a9f4a481a1df35",
+    "probe_bal_acc-raw": 0.296,
+    "probe_bal_acc-promptcentred": 0.3994
+  },
+  "ft-crawl": {
+    "source_file": "crawl-300d-2M.vec.zip",
+    "source_url": "https://dl.fbaipublicfiles.com/fasttext/vectors-english/crawl-300d-2M.vec.zip",
+    "source_sha256": "5bfffffbabdab299d4c9165c47275e8f982807a6eaca37ee1f71d3a79ddb544d",
+    "tokenizer_config": {
+      "clitics": "split",
+      "hyphens": "backoff",
+      "digits": "keep",
+      "phrases": 1,
+      "curly": "mark",
+      "case_backoff": "lower"
+    },
+    "n_texts": 2702,
+    "n_types": 19517,
+    "subset_fingerprint": "c81b13dd28ef9a8537f7a9788a7f9ad95a519c02f1eed43e7ce184111a5a856c",
+    "probe_bal_acc-raw": 0.2853,
+    "probe_bal_acc-promptcentred": 0.406
+  },
+  "glove-840b": {
+    "source_file": "glove.840B.300d.zip",
+    "source_url": "https://huggingface.co/stanfordnlp/glove/resolve/main/glove.840B.300d.zip",
+    "source_sha256": "f47355dd5b267bd10f08671e513790690233c76a9ffd73aa915d78f894a8912e",
+    "tokenizer_config": {
+      "clitics": "ptb",
+      "hyphens": "backoff",
+      "digits": "keep",
+      "phrases": 1,
+      "curly": "keep",
+      "case_backoff": "lower"
+    },
+    "n_texts": 2702,
+    "n_types": 19448,
+    "subset_fingerprint": "fae106d03247bf32e26d03fc2dfbb3275c1de016a4ce1e4bd97ced6b713352da",
+    "probe_bal_acc-raw": 0.2698,
+    "probe_bal_acc-promptcentred": 0.3868
+  }
+}

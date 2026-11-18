@@ -4,7 +4,7 @@
 
 2. @CECCE
 - Curly quote vs straight quotes, all the EDA on the word embeddings from the two models.
-- Task-specifc: so based on the alignment with the EDA thindings.
+- Task-specifc: so based on the alignment with the EDA findings.
 - Word2Vec and fasText limitations.
 - The main limitation is that they are static.
 
