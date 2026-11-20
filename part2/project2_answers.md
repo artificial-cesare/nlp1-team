@@ -115,40 +115,37 @@ The tutorial pipeline lowercases everything, turns `"` into ` `` `/`''`, and pro
 * What design choices have meaningful impact in classification performance (eg, embedding size, architecture design, optimisation parameters), if any?
 * Is this better than what you could achieve last week? In other words, did pretrained embeddings add to your design?
 
-_Answer (first bullet): initial answer by Cesare from the step 2 probe. For my G liam: mean vs sum vs max pooling, and frozen vs trainable embeddings
+_Answer (Liam; notebook `part2/liam_embed_and_pool.ipynb`). Frozen fastText Common Crawl, balanced accuracy, shared folds, Bayesian correlated t-test with ROPE 1 pp. Cesare's first draft is in git history (01cd4f3)._
 
-**How we pool.** Each text is tokenised with the embedding's own tokeniser (`EmbTokenizer`, settings in `WV.TOKENIZER_CONFIG`). Every token is looked up in the 300d table, which stays frozen, and the text vector is the **mean** of its token vectors (about 134 per text). There are two implementations:
-- **Probe (step 2.5):** `WV.pool` averages the tokens that have a vector and skips unknown ones (0.05% of tokens). A logistic regression is then trained on the result.
-- **Neural model (step 3):** `clslib.EmbedAndPoolEncoder`, run with `embcv.run_cv_torch`. It averages all non-padding tokens; an unknown token maps to `<unk>`, whose vector is the mean of the whole table. `enc_kwargs={"average_pool": False}` gives the sum instead. The pooled vector then goes into the MLP head.
-- **Prompt-centred** variants subtract, from each pooled vector, the mean pooled vector of all texts written for the same prompt (`shared.prompt_groups.prompt_centre`). This uses no author labels.
+**First bullet: which design choices matter.** What goes into the pooled vector matters; the classifier on top does not.
 
-**Design choices tested so far, largest effect first** (balanced accuracy; P from the Bayesian correlated t-test, ROPE 1 pp):
+| Choice | Effect | Folds | Decided? |
+|---|---|---|---|
+| Prompt-centring the pooled vector (same MLP) | **+13.4 pp** (27.4% → 40.8%) | 5 | yes, P = 0.999 |
+| Function-word + punctuation channel next to the mean (logreg) | **+2.4 pp** (40.6% → 43.0%) | 50 | nearly, P = 0.94 |
+| Embedding size: PCA 50 / 100 / 200 vs 300 (logreg) | **−6.1 / −5.6 / −4.5 pp** | 50 | yes, P ≥ 0.999: all 300 dims are needed |
+| Adding max pooling to mean + func (logreg) | −1.4 pp | 50 | doesn't help (P(better) = 0.01) |
+| Epochs 20 → 100, tutorial MLP (`embcv`, not centred) | 19.8% → 23.1%; best epoch now 24–65 | 5 | was undertrained, now converged |
+| MLP vs logreg, centred mean | −0.4 pp | 50 | likely equal, P(ROPE) = 0.68 |
+| MLP (nested-tuned) vs logreg, centred mean + func | +0.6 pp (43.6% vs 43.0%) | 50 | likely equal, P(ROPE) = 0.65 |
+| Tuned MLP / ResMLP vs logreg, centred mean | +0.7 / −1.4 pp | 5 | undecided |
 
-| Choice | Effect | Evidence |
-|---|---|---|
-| Prompt-centring the pooled vector | **+12 pp** (28.5% → 40.6%) | probe, 50 folds |
-| Head and training budget | default MLP (50×50, 20 epochs) is **9.7 pp below** logistic regression on the same vectors (19.8%, P = 0.997); its best epoch was 17–19 of 20 in every fold, so it is undertrained | 5 folds |
-| Which embedding | fastText vs word2vec +3.1 / +5.5 pp (P = 0.92 / ≈ 1.00); vs GloVe +1.6 / +1.9 pp (P = 0.66 / 0.79); the two fastText corpora are equivalent | probe, raw / centred |
-| Which tokens are pooled | function words + punctuation alone: 27.1%, +5.0 pp over content words (P = 0.998), about equal to all tokens | probe |
-| Curly quotes | folding `’` into `'` loses 0.8 pp (P(fold better) = 0.004) | probe |
-| Our tokeniser vs the tutorial's | inside the ROPE for mean pooling | probe |
-| Embedding size | **not tested yet**; `emb.pca(k)` gives the same table at k dims | |
-| Pooling function (mean / sum / max) | **not tested yet**; sum is a flag, max needs a few lines in the encoder | |
-| Frozen vs trainable embeddings | **not tested yet**; `enc_kwargs={"freeze_embeddings": False}` | |
+- Upward embedding sizes can't be tested: the cased releases are 300d only.
+- The tutorial MLP pipeline (`embcv`) trails the harness MLP on the same raw vectors (23.1% vs 27.4%, 5 folds, not tested): the harness standardises inputs and refits on the full training fold.
 
-**Tentative answer:** so far, **what goes into the pooled vector** matters much more than the classifier: prompt-centring, the choice of embedding and which tokens are pooled move results by 2–12 pp. The architecture and optimiser matter mainly because the default head is undertrained.
+**Best embed-and-pool system:** mean of all tokens + mean of function words/punctuation, prompt-centred, logistic regression: **43.0%** (50 folds).
 
-**Suggested next steps for Liam, in order:**
-1. **Fix the head first:** more epochs (`embcv` already early-stops on an inner split) or a higher learning rate, until the MLP at least matches logistic regression (28.5%). Otherwise every other comparison measures undertraining.
-2. **Prompt-centring inside the neural model** (largest known effect).
-3. **Embedding size:** `emb.pca(50/100/200)` vs 300, everything else fixed.
-4. **Pooling:** mean vs sum vs max, or mean and max concatenated (max may keep rare cues such as the em dash that the mean dilutes).
-5. **Frozen vs trainable embeddings.**
-6. **GloVe as the second embedding** (`WV.load_subset("glove-840b")`).
+**Second bullet: did pretrained embeddings help vs part 1?** Yes against part 1's bag-of-words features, no against its contextual embeddings (same 50 folds):
 
-Compare each pair with `H.compare` (ROPE 1 pp). If a difference is under about 2 pp, run `repeats=2` or more before concluding.
+| Part 1 system | Part 1 | Ours (43.0%) − part 1 | Decided? |
+|---|---|---|---|
+| BPE bag-of-words (`bow-ours4k`) | 21.7% | +21.3 pp | yes, P ≈ 1.00 |
+| Character 2–4-grams | 26.0% | +17.0 pp | yes, P ≈ 1.00 |
+| LUSR | 35.8% | +7.2 pp | yes, P ≈ 1.00 |
+| LUSR, prompt-centred | 44.1% | −1.0 pp | undecided (P(ROPE) = 0.42) |
+| Qwen3-Base L14, prompt-centred | 48.7% | −5.7 pp | yes, part 1 better (P = 0.999) |
 
-_Answer (second bullet):_
+Part of the gain over bag-of-words and raw LUSR comes from centring, which those baselines lack. Like for like, raw fastText (28.5%) beats BPE bag-of-words (+6.8 pp, P ≈ 1.00), probably beats character n-grams (+2.5 pp, P = 0.88), and trails raw LUSR by 7.3 pp (P ≈ 1.00).
 
 ## 4. Experiment with a recurrent encoder (GRU or LSTM). — **@KAZIK**
 * What design choices have meaningful impact in classification performance, if any?
