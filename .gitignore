@@ -18,7 +18,8 @@ cache/
 
 # Kazik's Claude setup files
 CLAUDE.md
-KAZ*
+KAZ*.md
+
 # Course tutorial: everyone runs it locally, don't track outputs
 part1/tutorial.ipynb
 part1/results/
